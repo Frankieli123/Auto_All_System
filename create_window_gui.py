@@ -24,6 +24,10 @@ from create_window import (
     delete_browsers_by_name, delete_browser_by_id, open_browser_by_id, create_browser_window, get_next_window_name
 )
 from run_playwright_google import process_browser
+from sheerid_verifier import SheerIDVerifier
+from sheerid_gui import SheerIDWindow
+import re
+from web_admin.server import run_server
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -31,7 +35,7 @@ def resource_path(relative_path):
         # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
+        base_path = os.path.dirname(os.path.abspath(__file__))
 
     return os.path.join(base_path, relative_path)
 
@@ -136,6 +140,8 @@ class WorkerThread(QThread):
             self.run_2fa()
         elif self.task_type == 'sheerlink':
             self.run_sheerlink()
+        elif self.task_type == 'verify_sheerid':
+            self.run_verify_sheerid()
 
     def run_sheerlink(self):
         """执行SheerLink提取任务 (多线程) + 统计"""
@@ -218,6 +224,91 @@ class WorkerThread(QThread):
         )
         self.log(f"\n{summary_msg}")
         self.finished_signal.emit({'type': 'sheerlink', 'count': success_count, 'summary': summary_msg})
+
+    def run_verify_sheerid(self):
+        links = self.kwargs.get('links', [])
+        thread_count = self.kwargs.get('thread_count', 1)
+        
+        self.log(f"\n[开始] 批量验证 {len(links)} 个链接 (并发: {thread_count})...")
+        
+        tasks = []
+        vid_map = {} # ID -> Original Line
+        
+        for line in links:
+            line = line.strip()
+            if not line: continue
+            
+            vid = None
+            # 优先提取参数中的 verificationId
+            match_param = re.search(r'verificationId=([a-zA-Z0-9]+)', line)
+            if match_param:
+                vid = match_param.group(1)
+            else:
+                # 兜底：提取路径中的 ID
+                match_path = re.search(r'verify/([a-zA-Z0-9]+)', line)
+                if match_path:
+                    vid = match_path.group(1)
+            
+            if vid:
+                tasks.append(vid)
+                vid_map[vid] = line
+        
+        if not tasks:
+            self.log("[错误] 未找到有效的 verificationId")
+            self.finished_signal.emit({'type': 'verify_sheerid', 'count': 0})
+            return
+
+        batches = [tasks[i:i + 5] for i in range(0, len(tasks), 5)]
+        
+        success_count = 0
+        fail_count = 0
+        
+        base_path = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+        path_success = os.path.join(base_path, "sheerID_verified_success.txt")
+        path_fail = os.path.join(base_path, "sheerID_verified_failed.txt")
+
+        # Define Callback
+        def status_callback(vid, msg):
+             self.log(f"[检测] {vid[:6]}...: {msg}")
+
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+             futures = []
+             for batch in batches:
+                 futures.append(executor.submit(self._verify_batch_wrapper, batch, status_callback))
+             
+             for future in as_completed(futures):
+                 if not self.is_running:
+                     self.log('[用户操作] 任务已停止')
+                     executor.shutdown(wait=False, cancel_futures=True)
+                     break
+                 
+                 try:
+                     results = future.result()
+                     for vid, res in results.items():
+                         status = res.get("currentStep") or res.get("status")
+                         msg = res.get("message", "")
+                         
+                         original_line = vid_map.get(vid, vid)
+                         
+                         if status == "success":
+                             success_count += 1
+                             self.log(f"[验证成功] {vid}")
+                             with open(path_success, 'a', encoding='utf-8') as f:
+                                 f.write(f"{original_line} | Success\n")
+                         else:
+                             fail_count += 1
+                             self.log(f"[验证失败] {vid}: {msg}")
+                             with open(path_fail, 'a', encoding='utf-8') as f:
+                                 f.write(f"{original_line} | {msg}\n")
+                 except Exception as e:
+                     self.log(f"[异常] Batch error: {e}")
+
+        self.log(f"[完成] 验证结束. 成功: {success_count}, 失败: {fail_count}")
+        self.finished_signal.emit({'type': 'verify_sheerid', 'count': success_count})
+
+    def _verify_batch_wrapper(self, batch_ids, callback=None):
+        v = SheerIDVerifier() 
+        return v.verify_batch(batch_ids, callback=callback)
 
     def run_open(self):
         """执行批量打开任务"""
@@ -443,6 +534,15 @@ class WorkerThread(QThread):
 class BrowserWindowCreatorGUI(QMainWindow):
     def __init__(self):
         super().__init__()
+        
+        # 设置窗口图标
+        try:
+            icon_path = resource_path("beta-1.svg")
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
+        except Exception:
+            pass
+
         self.ensure_data_files()
         self.worker_thread = None
         self.init_ui()
@@ -514,6 +614,24 @@ class BrowserWindowCreatorGUI(QMainWindow):
         """)
         self.btn_sheerlink.clicked.connect(self.action_get_sheerlink)
         google_layout.addWidget(self.btn_sheerlink)
+        
+        # New Button: Verify SheerID
+        self.btn_verify_sheerid = QPushButton("批量验证 SheerID Link")
+        self.btn_verify_sheerid.setFixedHeight(40)
+        self.btn_verify_sheerid.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_verify_sheerid.setStyleSheet("""
+            QPushButton {
+                text-align: left; 
+                padding-left: 15px; 
+                font-weight: bold; 
+                color: white;
+                background-color: #2196F3;
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #1976D2; }
+        """)
+        self.btn_verify_sheerid.clicked.connect(self.action_verify_sheerid)
+        google_layout.addWidget(self.btn_verify_sheerid)
         
         google_layout.addStretch()
         google_page.setLayout(google_layout)
@@ -836,6 +954,18 @@ class BrowserWindowCreatorGUI(QMainWindow):
         
         if reply == QMessageBox.StandardButton.Yes:
             self.start_worker_thread('sheerlink', ids=ids, thread_count=thread_count)
+
+    def action_verify_sheerid(self):
+        """打开 SheerID 批量验证窗口"""
+        try:
+            if not hasattr(self, 'verify_window') or self.verify_window is None:
+                self.verify_window = SheerIDWindow(self)
+            
+            self.verify_window.show()
+            self.verify_window.raise_()
+            self.verify_window.activateWindow()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"无法打开验证窗口: {e}")
         
     def open_selected_browsers(self):
         """打开选中的窗口"""
@@ -999,6 +1129,10 @@ class BrowserWindowCreatorGUI(QMainWindow):
             else:
                  QMessageBox.information(self, "完成", f"SheerLink 提取任务结束\n成功提取: {count} 个\n结果保存在 sheerIDlink.txt")
 
+        elif result.get('type') == 'verify_sheerid':
+            count = result.get('count', 0)
+            QMessageBox.information(self, "完成", f"SheerID 批量验证结束\n成功: {count} 个\n结果已保存至 sheerID_verified_success/failed.txt")
+
     def update_ui_state(self, running):
         """更新UI按钮状态"""
         self.start_btn.setEnabled(not running)
@@ -1006,16 +1140,45 @@ class BrowserWindowCreatorGUI(QMainWindow):
         self.open_btn.setEnabled(not running)
         self.btn_2fa.setEnabled(not running)
         self.btn_sheerlink.setEnabled(not running)
+        self.btn_verify_sheerid.setEnabled(not running)
         self.stop_btn.setEnabled(running)
         self.refresh_btn.setEnabled(not running)
 
 
 def main():
+    try:
+        t = threading.Thread(target=run_server, args=(8080,), daemon=True)
+        t.start()
+        print("Web Admin started on http://localhost:8080")
+    except Exception as e:
+        print(f"Error starting Web Admin: {e}")
+
+    # 确保打包时包含 SVG 支持
+    import PyQt6.QtSvg
+
+    # Fix taskbar icon on Windows
+    import ctypes
+    try:
+        myappid = 'leclee.bitbrowser.automanager.1.0'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except:
+        pass
+
     app = QApplication(sys.argv)
     
     # 设置全局字体
     font = QFont("Microsoft YaHei", 9)
     app.setFont(font)
+    
+    # 设置全局图标
+    icon_path = resource_path("beta-1.svg")
+    if os.path.exists(icon_path):
+        icon = QIcon(icon_path)
+        app.setWindowIcon(icon)
+    else:
+        # 如果打包环境下找不到图标，提示
+        if hasattr(sys, '_MEIPASS'):
+             QMessageBox.warning(None, "Icon Missing", f"Icon not found at: {icon_path}")
     
     window = BrowserWindowCreatorGUI()
     window.show()

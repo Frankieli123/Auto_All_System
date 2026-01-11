@@ -5,9 +5,25 @@ sheerIDlink.txt
 无资格号.txt
 已绑卡号.txt
 已验证未绑卡.txt
+有资格待验证号.txt
 超时或其他错误.txt
+sheerID_verified_failed.txt
 2fa_codes.txt
 sheerid_tool/
+
+# Exclude database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Exclude log files
+*.log
+
+# Exclude debug/test files
+debug_*.html
+step*.png
+error*.png
 
 # Exclude all images by default
 *.jpg
@@ -32,12 +48,19 @@ __pycache__/
 *.pyc
 temp_config.json
 temp_icon.png
-debug_*.png
 
 # Exclude IDE settings
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
 
 # Exclude virtual env
 venv/
 env/
+
+# Exclude OS files
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -9,6 +9,7 @@ from playwright.async_api import async_playwright, Playwright
 from bit_api import openBrowser, closeBrowser
 from create_window import get_browser_list, get_browser_info
 from deep_translator import GoogleTranslator
+from account_manager import AccountManager
 
 # Global lock for file writing safety
 file_write_lock = threading.Lock()
@@ -185,9 +186,7 @@ async def _automate_login_and_extract(playwright: Playwright, browser_id: str, a
                     if 'secret' in account_info:
                         acc_line += f"----{account_info['secret']}"
                         
-                    with file_write_lock:
-                        with open(save_path_subscribed, "a", encoding="utf-8") as f:
-                            f.write(f"{acc_line}\n")
+                    AccountManager.move_to_subscribed(acc_line)
                     print(f"Saved subscribed account to {save_path_subscribed}")
                     return True, "已绑卡 (Subscribed)"
 
@@ -218,9 +217,7 @@ async def _automate_login_and_extract(playwright: Playwright, browser_id: str, a
                     if 'secret' in account_info: acc_line += f"----{account_info['secret']}"
                     if unbound_href: acc_line = f"{unbound_href}----{acc_line}"
                     
-                    with file_write_lock:
-                        with open(save_path_verified, "a", encoding="utf-8") as f:
-                            f.write(f"{acc_line}\n")
+                    AccountManager.move_to_verified(acc_line)
                     print(f"Saved verified unbound account to {save_path_verified}")
                     return True, "已过验证未绑卡 (Get Offer)"
 
@@ -256,9 +253,7 @@ async def _automate_login_and_extract(playwright: Playwright, browser_id: str, a
                                 href = await link_element.get_attribute("href")
                                 if href: acc_line = f"{href}----{acc_line}"
 
-                                with file_write_lock:
-                                    with open(save_path_verified, "a", encoding="utf-8") as f:
-                                        f.write(f"{acc_line}\n")
+                                AccountManager.move_to_verified(acc_line)
                                 print(f"Saved verified unbound account (via translation) to {save_path_verified}")
                                 return True, "已过验证未绑卡 (Get Offer Translated)"
                     except Exception as e:
@@ -299,9 +294,7 @@ async def _automate_login_and_extract(playwright: Playwright, browser_id: str, a
                     if 'backup' in account_info: acc_line += f"----{account_info['backup']}"
                     if 'secret' in account_info: acc_line += f"----{account_info['secret']}"
                         
-                    with file_write_lock:
-                        with open(save_path_subscribed, "a", encoding="utf-8") as f:
-                            f.write(f"{acc_line}\n")
+                    AccountManager.move_to_subscribed(acc_line)
                     print(f"Saved subscribed account to {save_path_subscribed}")
                     return True, "已绑卡 (Subscribed-Trans)"
 
@@ -320,14 +313,17 @@ async def _automate_login_and_extract(playwright: Playwright, browser_id: str, a
 
                 if href:
                     print(f"Extracted Link: {href}")
-                    line = f"{href}----{email}"
                     
-                    # Save to file
-                    save_path = os.path.join(get_base_path(), "sheerIDlink.txt")
-                    with file_write_lock:
-                        with open(save_path, "a", encoding="utf-8") as f:
-                            f.write(line + "\n")
-                    print(f"Saved link to {save_path}")
+                    full_acc = account_info.get('email', '')
+                    if 'password' in account_info: full_acc += f"----{account_info['password']}"
+                    if 'backup' in account_info: full_acc += f"----{account_info['backup']}"
+                    if 'secret' in account_info: full_acc += f"----{account_info['secret']}"
+                    
+                    line = f"{href}----{full_acc}"
+                    
+                    # Save to DB (via AccountManager)
+                    AccountManager.save_link(line)
+                    print("Saved link and account info to DB")
                     return True, "提取成功 (Link Found)"
                 else:
                     print("Link element found but has no href.")
@@ -338,20 +334,24 @@ async def _automate_login_and_extract(playwright: Playwright, browser_id: str, a
                 if is_invalid:
                     reason = "Offer not available"
                     print(f"Account marked as NOT eligible: {reason}")
-                    save_path_invalid = os.path.join(get_base_path(), "无资格号.txt")
-                    with file_write_lock:
-                        with open(save_path_invalid, "a", encoding="utf-8") as f:
-                            f.write(f"{email}\n")
-                    print(f"Saved to {save_path_invalid}")
+                    full_acc = account_info.get('email', '')
+                    if 'password' in account_info: full_acc += f"----{account_info['password']}"
+                    if 'backup' in account_info: full_acc += f"----{account_info['backup']}"
+                    if 'secret' in account_info: full_acc += f"----{account_info['secret']}"
+
+                    AccountManager.move_to_ineligible(full_acc)
+                    print(f"Saved to ineligible file")
                     return False, f"无资格 ({reason})"
                 else:
                     reason = "Timeout (10s allowed)"
                     print(f"Account timed out: {reason}")
-                    save_path_timeout = os.path.join(get_base_path(), "超时或其他错误.txt")
-                    with file_write_lock:
-                        with open(save_path_timeout, "a", encoding="utf-8") as f:
-                            f.write(f"{email}\n")
-                    print(f"Saved to {save_path_timeout}")
+                    full_acc = account_info.get('email', '')
+                    if 'password' in account_info: full_acc += f"----{account_info['password']}"
+                    if 'backup' in account_info: full_acc += f"----{account_info['backup']}"
+                    if 'secret' in account_info: full_acc += f"----{account_info['secret']}"
+
+                    AccountManager.move_to_error(full_acc)
+                    print(f"Saved to error file")
                     await page.screenshot(path="debug_eligibility_timeout.png")
                     return False, f"超时 ({reason})" 
 

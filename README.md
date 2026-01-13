@@ -81,14 +81,40 @@
 
 请在程序运行目录下创建以下文件：
 
-### 1. `accounts.txt` (账号信息)
+### 1. `accounts.txt` (账号信息) - 🆕 支持智能解析
 
-格式：`邮箱----密码----辅助邮箱----2FA密钥`
+**智能解析特性**：
+- ✅ **支持多种分隔符**：`----`、`|`、`,`、`;`、`/`、`\`、空格等
+- ✅ **自动识别字段**：智能识别邮箱、密码、辅助邮箱、2FA密钥
+- ✅ **灵活字段顺序**：字段可以任意顺序排列
+- ✅ **容错处理**：允许缺少辅助邮箱或2FA密钥
+
+**支持的格式示例**：
 
 ```text
+# 标准格式（推荐）
 example1@gmail.com----Password123----recov1@email.com----SECRETKEY123
-example2@gmail.com----Password456----recov2@email.com----SECRETKEY456
+
+# 使用竖线分隔
+example2@gmail.com|Password456|recov2@email.com|SECRETKEY456
+
+# 使用逗号分隔
+example3@gmail.com,Password789,SECRETKEY789
+
+# 缺少辅助邮箱
+example4@gmail.com----Password111----SECRETKEY111
+
+# 只有邮箱和密码
+example5@gmail.com----Password222
+
+# 混合格式（程序会自动识别）
+example6@gmail.com / Password333 / SECRETKEY333
 ```
+
+**字段识别规则**：
+- **邮箱**：包含 `@` 和 `.` 的字符串（第一个识别为主邮箱，第二个为辅助邮箱）
+- **2FA密钥**：16位以上的大写字母和数字组合（Base32格式）
+- **密码**：其他非邮箱、非密钥的字符串
 
 ### 2. `proxies.txt` (代理IP)
 

@@ -50,24 +50,61 @@ class DBManager:
 
     @staticmethod
     def _simple_parse(line):
-        parts = [p.strip() for p in line.split('----') if p.strip()]
+        """
+        智能解析账号信息行（支持各种分隔符）
+        """
+        import re
+        
+        # 移除注释
+        if '#' in line:
+            line = line.split('#')[0].strip()
+        
+        if not line:
+            return None, None, None, None, None
+        
+        # 识别HTTP链接
         link = None
+        link_match = re.search(r'https?://[^\s]+', line)
+        if link_match:
+            link = link_match.group()
+            # 移除链接后继续解析
+            line = line.replace(link, '').strip()
+        
+        # 使用正则表达式分割（保留邮箱中的@和.）
+        parts = re.split(r'[^\w@.]+', line)
+        parts = [p.strip() for p in parts if p.strip()]
+        
         email = None
         pwd = None
         rec = None
         sec = None
         
-        if parts and "http" in parts[0]:
-            link = parts[0]
-            parts = parts[1:]
-            
-        for i, p in enumerate(parts):
-            if '@' in p and '.' in p:
-                email = p
-                if i+1 < len(parts): pwd = parts[i+1]
-                if i+2 < len(parts): rec = parts[i+2]
-                if i+3 < len(parts): sec = parts[i+3]
-                break
+        emails = []
+        secrets = []
+        others = []
+        
+        # 分类各个部分
+        for part in parts:
+            if '@' in part and '.' in part:
+                emails.append(part)
+            elif re.match(r'^[A-Z2-7]{16,}$', part):
+                # 2FA密钥（Base32）
+                secrets.append(part)
+            else:
+                others.append(part)
+        
+        # 分配字段
+        if len(emails) >= 1:
+            email = emails[0]
+        if len(emails) >= 2:
+            rec = emails[1]
+        
+        if len(secrets) >= 1:
+            sec = secrets[0]
+        
+        if len(others) >= 1:
+            pwd = others[0]
+        
         return email, pwd, rec, sec, link
 
     @staticmethod

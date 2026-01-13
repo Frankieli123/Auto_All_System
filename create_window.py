@@ -53,9 +53,86 @@ def read_proxies(file_path: str) -> list:
     return proxies
 
 
+def smart_parse_account_line(line: str) -> dict:
+    """
+    智能解析账号信息行
+    
+    支持各种分隔符：---- | , ; / \ 等
+    支持灵活字段：email、password、backup_email、2fa_secret
+    
+    Args:
+        line: 账号信息行
+        
+    Returns:
+        解析后的账号字典
+    """
+    import re
+    
+    # 移除注释
+    if '#' in line:
+        line = line.split('#')[0].strip()
+    
+    if not line:
+        return None
+    
+    # 识别所有可能的分隔符（非字母数字的连续字符）
+    # 常见分隔符: ----, |, ,, ;, /, \, 空格等
+    # 使用正则表达式分割，保留所有非空白的部分
+    parts = re.split(r'[^\w@.]+', line)
+    parts = [p.strip() for p in parts if p.strip()]
+    
+    if not parts:
+        return None
+    
+    result = {
+        'email': '',
+        'password': '',
+        'backup_email': '',
+        '2fa_secret': '',
+        'full_line': line
+    }
+    
+    emails = []
+    secrets = []
+    others = []
+    
+    # 分类各个部分
+    for part in parts:
+        if '@' in part and '.' in part:
+            # 邮箱格式
+            emails.append(part)
+        elif re.match(r'^[A-Z2-7]{16,}$', part):
+            # 2FA密钥格式（Base32编码，通常16-32位大写字母和数字2-7）
+            secrets.append(part)
+        else:
+            # 其他（可能是密码）
+            others.append(part)
+    
+    # 分配字段
+    if len(emails) >= 1:
+        result['email'] = emails[0]
+    if len(emails) >= 2:
+        result['backup_email'] = emails[1]
+    
+    if len(secrets) >= 1:
+        result['2fa_secret'] = secrets[0]
+    
+    if len(others) >= 1:
+        result['password'] = others[0]
+    
+    return result if result['email'] else None
+
+
 def read_accounts(file_path: str) -> list:
     """
-    读取账户信息文件
+    读取账户信息文件（智能解析版本）
+    
+    支持多种格式：
+    - email----password----backup----secret
+    - email|password|secret
+    - email,password,backup,secret
+    - email password secret
+    等等...
     
     Args:
         file_path: 账户文件路径
@@ -71,21 +148,18 @@ def read_accounts(file_path: str) -> list:
     
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                parts = line.split('----')
-                if len(parts) >= 4:
-                    accounts.append({
-                        'email': parts[0].strip(),
-                        'password': parts[1].strip(),
-                        'backup_email': parts[2].strip(),
-                        '2fa_secret': parts[3].strip(),
-                        'full_line': line
-                    })
-    except Exception:
-        pass
+                
+                account = smart_parse_account_line(line)
+                if account:
+                    accounts.append(account)
+                else:
+                    print(f"警告: 第{line_num}行无法解析邮箱: {line[:50]}")
+    except Exception as e:
+        print(f"读取文件出错: {e}")
     
     return accounts
 

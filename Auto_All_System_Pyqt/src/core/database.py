@@ -436,6 +436,62 @@ class DBManager:
             conn.close()
             return {row['status']: row['count'] for row in rows}
     
+    @staticmethod
+    def get_sheerid_link_by_browser(browser_id: str) -> str:
+        """
+        @brief 根据browser_id获取SheerID验证链接
+        @param browser_id 浏览器窗口ID
+        @return 验证链接或空字符串
+        """
+        with lock:
+            conn = DBManager.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT verification_link FROM accounts 
+                WHERE browser_id = ?
+            """, (browser_id,))
+            row = cursor.fetchone()
+            conn.close()
+            return row['verification_link'] if row and row['verification_link'] else ''
+    
+    @staticmethod
+    def update_sheerid_link(email: str, link: str):
+        """
+        @brief 更新账号的SheerID验证链接
+        @param email 邮箱
+        @param link 验证链接
+        """
+        DBManager.upsert_account(email, link=link)
+    
+    @staticmethod
+    def update_account_status(email: str, status: str, message: str = None):
+        """
+        @brief 更新账号状态
+        @param email 邮箱
+        @param status 新状态
+        @param message 状态消息
+        """
+        DBManager.upsert_account(email, status=status, message=message)
+    
+    @staticmethod
+    def update_account_status_by_sheerid(verification_id: str, status: str):
+        """
+        @brief 根据SheerID验证ID更新账号状态
+        @param verification_id SheerID验证ID
+        @param status 新状态
+        """
+        with lock:
+            conn = DBManager.get_connection()
+            cursor = conn.cursor()
+            # 查找包含此验证ID的账号
+            cursor.execute("""
+                UPDATE accounts 
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE verification_link LIKE ?
+            """, (status, f'%{verification_id}%'))
+            conn.commit()
+            conn.close()
+    
     # ==================== 代理管理 ====================
     
     @staticmethod

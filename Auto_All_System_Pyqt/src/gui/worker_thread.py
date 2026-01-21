@@ -59,6 +59,12 @@ class WorkerThread(QThread):
                 self.run_open()
             elif self.task_type == '2fa':
                 self.run_2fa()
+            elif self.task_type == 'verify_sheerid':
+                self.run_verify_sheerid()
+            elif self.task_type == 'bind_card':
+                self.run_bind_card()
+            elif self.task_type == 'all_in_one':
+                self.run_all_in_one()
         except Exception as e:
             self.log(f"❌ 任务执行异常: {e}")
             import traceback
@@ -369,5 +375,215 @@ class WorkerThread(QThread):
             'type': '2fa', 
             'count': len(twofa_data),
             'data': twofa_data
+        })
+    
+    def run_verify_sheerid(self):
+        """批量验证SheerID链接"""
+        verification_ids = self.kwargs.get('ids', [])
+        api_key = self.kwargs.get('api_key', '')
+        
+        if not verification_ids:
+            self.log("❌ 未提供验证ID")
+            self.finished_signal.emit({'type': 'verify_sheerid', 'count': 0})
+            return
+        
+        if not api_key:
+            self.log("❌ 未提供API Key")
+            self.finished_signal.emit({'type': 'verify_sheerid', 'count': 0, 'error': '未提供API Key'})
+            return
+        
+        self.log(f"\n[开始] 批量验证SheerID，共 {len(verification_ids)} 个...")
+        
+        try:
+            from google.backend.sheerid_verifier import SheerIDVerifier
+            from core.database import DBManager
+        except ImportError as e:
+            self.log(f"❌ 导入失败: {e}")
+            self.finished_signal.emit({'type': 'verify_sheerid', 'count': 0, 'error': str(e)})
+            return
+        
+        verifier = SheerIDVerifier(api_key)
+        success_count = 0
+        
+        def on_status(vid, msg):
+            self.log(f"  [{vid[:20]}...] {msg}")
+        
+        # 分批处理，每批最多5个
+        batch_size = 5
+        for i in range(0, len(verification_ids), batch_size):
+            if not self.is_running:
+                self.log('[用户操作] 任务已停止')
+                break
+            
+            batch = verification_ids[i:i+batch_size]
+            self.log(f"\n处理第 {i//batch_size + 1} 批 ({len(batch)} 个)...")
+            
+            results = verifier.verify_batch(batch, callback=on_status)
+            
+            for vid, result in results.items():
+                status = result.get('currentStep', result.get('status', 'unknown'))
+                if status == 'success':
+                    self.log(f"  ✅ {vid[:20]}... 验证成功")
+                    success_count += 1
+                    # 更新数据库状态
+                    try:
+                        DBManager.update_account_status_by_sheerid(vid, 'verified')
+                    except:
+                        pass
+                else:
+                    self.log(f"  ❌ {vid[:20]}... 验证失败: {result.get('message', status)}")
+            
+            self.progress_signal.emit(min(i + batch_size, len(verification_ids)), len(verification_ids))
+        
+        self.log(f"\n验证完成，成功 {success_count}/{len(verification_ids)} 个")
+        self.finished_signal.emit({
+            'type': 'verify_sheerid',
+            'count': success_count,
+            'total': len(verification_ids)
+        })
+    
+    def run_bind_card(self):
+        """批量绑卡订阅"""
+        ids_to_process = self.kwargs.get('ids', [])
+        card_info = self.kwargs.get('card_info', None)
+        thread_count = self.kwargs.get('thread_count', 1)
+        
+        if not ids_to_process:
+            self.finished_signal.emit({'type': 'bind_card', 'count': 0})
+            return
+        
+        self.log(f"\n[开始] 批量绑卡订阅，共 {len(ids_to_process)} 个窗口，并发: {thread_count}")
+        
+        try:
+            from google.backend.bind_card_service import process_bind_card
+        except ImportError as e:
+            self.log(f"❌ 导入失败: {e}")
+            self.finished_signal.emit({'type': 'bind_card', 'count': 0, 'error': str(e)})
+            return
+        
+        success_count = 0
+        
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            future_to_id = {}
+            for bid in ids_to_process:
+                if not self.is_running:
+                    break
+                callback = lambda msg, b=bid: self.log_signal.emit(f"[{b[:8]}...] {msg}")
+                future = executor.submit(process_bind_card, bid, card_info=card_info, log_callback=callback)
+                future_to_id[future] = bid
+            
+            finished_tasks = 0
+            for future in as_completed(future_to_id):
+                if not self.is_running:
+                    self.log('[用户操作] 任务已停止')
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                
+                bid = future_to_id[future]
+                finished_tasks += 1
+                self.progress_signal.emit(finished_tasks, len(ids_to_process))
+                
+                try:
+                    success, msg = future.result()
+                    if success:
+                        self.log(f"✅ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
+                        success_count += 1
+                    else:
+                        self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
+                except Exception as e:
+                    self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {e}")
+        
+        self.log(f"\n绑卡订阅完成，成功 {success_count}/{len(ids_to_process)} 个")
+        self.finished_signal.emit({
+            'type': 'bind_card',
+            'count': success_count,
+            'total': len(ids_to_process)
+        })
+    
+    def run_all_in_one(self):
+        """一键全自动处理"""
+        ids_to_process = self.kwargs.get('ids', [])
+        api_key = self.kwargs.get('api_key', '')
+        card_info = self.kwargs.get('card_info', None)
+        thread_count = self.kwargs.get('thread_count', 1)
+        
+        if not ids_to_process:
+            self.finished_signal.emit({'type': 'all_in_one', 'count': 0})
+            return
+        
+        self.log(f"\n[开始] 一键全自动处理，共 {len(ids_to_process)} 个窗口")
+        self.log(f"流程: 提取SheerLink → 验证SheerID → 绑卡订阅")
+        
+        try:
+            from google.backend.all_in_one_service import process_all_in_one
+        except ImportError as e:
+            self.log(f"❌ 导入失败: {e}")
+            self.finished_signal.emit({'type': 'all_in_one', 'count': 0, 'error': str(e)})
+            return
+        
+        stats = {
+            'link_extracted': 0,
+            'verified': 0,
+            'subscribed': 0,
+            'failed': 0
+        }
+        
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            future_to_id = {}
+            for bid in ids_to_process:
+                if not self.is_running:
+                    break
+                callback = lambda msg, b=bid: self.log_signal.emit(f"[{b[:8]}...] {msg}")
+                future = executor.submit(
+                    process_all_in_one, bid,
+                    api_key=api_key,
+                    card_info=card_info,
+                    log_callback=callback
+                )
+                future_to_id[future] = bid
+            
+            finished_tasks = 0
+            for future in as_completed(future_to_id):
+                if not self.is_running:
+                    self.log('[用户操作] 任务已停止')
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                
+                bid = future_to_id[future]
+                finished_tasks += 1
+                self.progress_signal.emit(finished_tasks, len(ids_to_process))
+                
+                try:
+                    success, final_status, msg = future.result()
+                    if success:
+                        self.log(f"✅ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
+                        if final_status == 'subscribed':
+                            stats['subscribed'] += 1
+                        elif final_status == 'verified':
+                            stats['verified'] += 1
+                        else:
+                            stats['link_extracted'] += 1
+                    else:
+                        self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
+                        stats['failed'] += 1
+                except Exception as e:
+                    self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {e}")
+                    stats['failed'] += 1
+        
+        summary = (
+            f"\n📊 全自动处理统计:\n"
+            f"--------------------------------\n"
+            f"💳 已订阅:        {stats['subscribed']}\n"
+            f"✅ 已验证:        {stats['verified']}\n"
+            f"🔗 已提取链接:    {stats['link_extracted']}\n"
+            f"❌ 失败:          {stats['failed']}\n"
+            f"--------------------------------\n"
+            f"总计处理: {finished_tasks}/{len(ids_to_process)}"
+        )
+        self.log(summary)
+        self.finished_signal.emit({
+            'type': 'all_in_one',
+            'count': stats['subscribed'],
+            'stats': stats
         })
 

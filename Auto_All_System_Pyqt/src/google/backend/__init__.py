@@ -9,6 +9,8 @@
 - google_auth: Google登录状态检测
 - google_login_service: Google登录服务
 - sheerlink_service: SheerLink提取服务
+- bind_card_service: 绑卡订阅服务
+- all_in_one_service: 全自动处理服务
 """
 
 from .sheerid_verifier import SheerIDVerifier
@@ -33,20 +35,13 @@ from .sheerlink_service import (
     process_browser,
     extract_sheerlink_batch,
 )
-
-# 待迁移的模块 - 目前从旧位置导入
-try:
-    import sys
-    import os
-    _src_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    _legacy_dir = os.path.join(_src_dir, '_legacy')
-    if _legacy_dir not in sys.path:
-        sys.path.insert(0, _legacy_dir)
-    
-    from auto_bind_card import auto_bind_card, check_and_login
-except ImportError as e:
-    print(f"[google.backend] 部分模块导入失败: {e}")
-    auto_bind_card = check_and_login = None
+from .bind_card_service import (
+    auto_bind_card,
+    process_bind_card,
+)
+from .all_in_one_service import (
+    process_all_in_one,
+)
 
 __all__ = [
     # 已迁移模块 - 核心类
@@ -69,8 +64,11 @@ __all__ = [
     # SheerLink服务
     'process_browser',
     'extract_sheerlink_batch',
-    # 待迁移模块
+    # 绑卡服务
     'auto_bind_card',
-    'check_and_login',
+    'process_bind_card',
+    # 全自动服务
+    'process_all_in_one',
 ]
+
 

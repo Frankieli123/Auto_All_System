@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QMessageBox, QGroupBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QSplitter,
-    QAbstractItemView, QSpinBox, QToolBox
+    QAbstractItemView, QSpinBox, QToolBox, QInputDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QColor, QIcon
@@ -918,37 +918,156 @@ class MainWindow(QMainWindow):
 
     
     def _action_verify_sheerid(self):
-        """打开SheerID验证窗口"""
+        """批量验证SheerID Link"""
+        selected_ids = self._get_selected_browser_ids()
+        if not selected_ids:
+            QMessageBox.warning(self, "提示", "请先在列表中勾选要处理的窗口")
+            return
+        
+        # 弹出输入API Key对话框
+        api_key, ok = QInputDialog.getText(
+            self, "SheerID API Key", 
+            "请输入SheerID验证API Key:\n(从 batch.1key.me 获取)",
+            QLineEdit.EchoMode.Normal, ""
+        )
+        
+        if not ok or not api_key.strip():
+            QMessageBox.warning(self, "提示", "未输入API Key")
+            return
+        
+        # 获取验证ID列表 (从数据库获取sheerid_link)
+        verification_ids = []
         try:
-            from google.frontend import SheerIDWindow
-            self.sheerid_window = SheerIDWindow(self)
-            self.sheerid_window.show()
+            from core.database import DBManager
+            for bid in selected_ids:
+                link = DBManager.get_sheerid_link_by_browser(bid)
+                if link:
+                    import re
+                    match = re.search(r'verificationId=([a-f0-9]+)', link)
+                    if match:
+                        verification_ids.append(match.group(1))
         except Exception as e:
-            self.log(f"打开SheerID验证窗口失败: {e}")
-            QMessageBox.warning(self, "错误", f"打开窗口失败: {e}")
+            self.log(f"获取验证ID失败: {e}")
+        
+        if not verification_ids:
+            QMessageBox.warning(self, "提示", "未找到可验证的SheerID链接\n请先执行'一键获取G-SheerLink'")
+            return
+        
+        msg = f"确定要验证 {len(verification_ids)} 个SheerID链接吗？"
+        reply = QMessageBox.question(
+            self, '确认操作', msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        self.log(f"\n开始验证SheerID，共 {len(verification_ids)} 个...")
+        
+        self._stop_flag = False
+        self.btn_stop.setEnabled(True)
+        
+        from gui.worker_thread import WorkerThread
+        self._worker = WorkerThread('verify_sheerid', ids=verification_ids, api_key=api_key.strip())
+        self._worker.log_signal.connect(self.log)
+        self._worker.finished_signal.connect(self._on_task_finished)
+        self._worker.start()
     
     def _action_bind_card(self):
-        """打开绑卡订阅窗口"""
-        try:
-            from google.frontend import BindCardWindow
-            self.bind_card_window = BindCardWindow()
-            self.bind_card_window.show()
-        except Exception as e:
-            self.log(f"打开绑卡窗口失败: {e}")
-            QMessageBox.warning(self, "错误", f"打开窗口失败: {e}")
+        """一键绑卡订阅"""
+        selected_ids = self._get_selected_browser_ids()
+        if not selected_ids:
+            QMessageBox.warning(self, "提示", "请先在列表中勾选要处理的窗口")
+            return
+        
+        thread_count = self.thread_spinbox.value()
+        
+        msg = f"确定要对选中的 {len(selected_ids)} 个窗口执行绑卡订阅吗？\n"
+        msg += f"当前并发模式: {thread_count} 线程\n"
+        msg += "将使用默认测试卡进行绑定和订阅。"
+        
+        reply = QMessageBox.question(
+            self, '确认操作', msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        self.log(f"\n开始绑卡订阅，共 {len(selected_ids)} 个窗口，并发: {thread_count}...")
+        
+        self._stop_flag = False
+        self.btn_stop.setEnabled(True)
+        
+        from gui.worker_thread import WorkerThread
+        self._worker = WorkerThread('bind_card', ids=selected_ids, thread_count=thread_count)
+        self._worker.log_signal.connect(self.log)
+        self._worker.finished_signal.connect(self._on_task_finished)
+        self._worker.start()
     
     def _action_auto_all(self):
-        """打开一键全自动处理窗口"""
-        try:
-            from google.frontend import AutoAllInOneWindow
-            if AutoAllInOneWindow:
-                self.auto_all_window = AutoAllInOneWindow()
-                self.auto_all_window.show()
-            else:
-                QMessageBox.warning(self, "提示", "功能模块未加载")
-        except Exception as e:
-            self.log(f"打开一键全自动窗口失败: {e}")
-            QMessageBox.warning(self, "错误", f"打开窗口失败: {e}")
+        """一键全自动处理"""
+        selected_ids = self._get_selected_browser_ids()
+        if not selected_ids:
+            QMessageBox.warning(self, "提示", "请先在列表中勾选要处理的窗口")
+            return
+        
+        thread_count = self.thread_spinbox.value()
+        
+        # 可选输入API Key
+        api_key, ok = QInputDialog.getText(
+            self, "SheerID API Key (可选)", 
+            "请输入SheerID验证API Key:\n(留空则跳过验证步骤)",
+            QLineEdit.EchoMode.Normal, ""
+        )
+        
+        msg = f"确定要对选中的 {len(selected_ids)} 个窗口执行全自动处理吗？\n"
+        msg += f"当前并发模式: {thread_count} 线程\n"
+        msg += "流程: 提取SheerLink → 验证SheerID → 绑卡订阅"
+        
+        reply = QMessageBox.question(
+            self, '确认操作', msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        self.log(f"\n开始全自动处理，共 {len(selected_ids)} 个窗口，并发: {thread_count}...")
+        
+        self._stop_flag = False
+        self.btn_stop.setEnabled(True)
+        
+        from gui.worker_thread import WorkerThread
+        self._worker = WorkerThread(
+            'all_in_one', 
+            ids=selected_ids, 
+            thread_count=thread_count,
+            api_key=api_key.strip() if api_key else ''
+        )
+        self._worker.log_signal.connect(self.log)
+        self._worker.finished_signal.connect(self._on_task_finished)
+        self._worker.start()
+    
+    def _on_task_finished(self, result: dict):
+        """通用任务完成回调"""
+        self.btn_stop.setEnabled(False)
+        self._refresh_browser_list()
+        
+        task_type = result.get('type', '')
+        count = result.get('count', 0)
+        
+        if self._stop_flag:
+            self.log("\n⚠️ 任务已被用户停止")
+        else:
+            task_names = {
+                'sheerlink': 'SheerLink提取',
+                'verify_sheerid': 'SheerID验证',
+                'bind_card': '绑卡订阅',
+                'all_in_one': '全自动处理'
+            }
+            name = task_names.get(task_type, task_type)
+            self.log(f"\n✅ {name}完成，成功 {count} 个")
 
 
 def main():

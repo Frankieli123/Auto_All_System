@@ -33,6 +33,7 @@ error*.png
 *.bmp
 *.svg
 *.ico
+!beta-1.svg
 
 # Exception: Keep specific community images
 !Telegram.jpg

@@ -1,0 +1,60 @@
+name: Build and Release (Windows EXE)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller pyinstaller-hooks-contrib
+
+      - name: Build EXE
+        run: |
+          pyinstaller -y --noconfirm --onefile --windowed --name BitBrowserAutoManager create_window_gui.py `
+            --add-data "beta-1.svg;." `
+            --add-data "web_admin/templates;web_admin/templates" `
+            --add-data "web_admin/static;web_admin/static"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BitBrowserAutoManager-windows
+          path: dist/BitBrowserAutoManager.exe
+
+  release:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/**/BitBrowserAutoManager.exe
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

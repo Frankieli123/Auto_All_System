@@ -12,6 +12,7 @@ from PyQt6.QtGui import QColor, QBrush
 
 from sheerid_verifier import SheerIDVerifier
 from account_manager import AccountManager
+from database import DBManager
 
 class VerifyWorker(QThread):
     progress_signal = pyqtSignal(dict) # {vid: ..., status: ..., msg: ...}
@@ -90,7 +91,7 @@ class SheerIDWindow(QDialog):
         self.api_key_input.setFixedWidth(250)
         top_layout.addWidget(self.api_key_input)
         
-        self.btn_load = QPushButton("刷新文件")
+        self.btn_load = QPushButton("刷新数据")
         self.btn_load.clicked.connect(self.load_data)
         top_layout.addWidget(self.btn_load)
         
@@ -123,30 +124,41 @@ class SheerIDWindow(QDialog):
         self.setLayout(layout)
 
     def load_data(self):
-        # 获取数据目录路径
-        if getattr(sys, 'frozen', False):
-            base_path = os.path.dirname(sys.executable)
-        else:
-            src_dir = os.path.dirname(os.path.abspath(__file__))
-            base_path = os.path.join(os.path.dirname(src_dir), 'data')
-        
-        path = os.path.join(base_path, "sheerIDlink.txt")
-        
-        if not os.path.exists(path):
-            QMessageBox.warning(self, "错误", "sheerIDlink.txt 不存在")
+        """从数据库加载 link_ready 状态的账号"""
+        try:
+            DBManager.init_db()
+            accounts = DBManager.get_accounts_by_status('link_ready')
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"加载数据失败: {e}")
             return
 
-        with open(path, 'r', encoding='utf-8') as f:
-            lines = [l.strip() for l in f.readlines() if l.strip()]
+        if not accounts:
+            QMessageBox.information(self, "提示", "没有待验证的SheerID链接\n请先执行 '一键获取 G-SheerLink'")
+            return
 
         self.table.setRowCount(0)
         self.vid_row_map = {}
         self.cb_select_all.setChecked(False)
         
         row = 0
-        for line in lines:
-            vid = self.extract_vid(line)
+        for acc in accounts:
+            link = acc.get('verification_link', '')
+            email = acc.get('email', '')
+            
+            if not link:
+                continue
+                
+            vid = self.extract_vid(link)
             if vid:
+                # 构建完整行数据（用于后续操作）
+                line = f"{link}----{email}"
+                if acc.get('password'):
+                    line += f"----{acc.get('password')}"
+                if acc.get('recovery_email'):
+                    line += f"----{acc.get('recovery_email')}"
+                if acc.get('secret_key'):
+                    line += f"----{acc.get('secret_key')}"
+                
                 self.table.insertRow(row)
                 
                 # Checkbox Item
@@ -156,9 +168,13 @@ class SheerIDWindow(QDialog):
                 self.table.setItem(row, 0, chk_item)
                 
                 self.table.setItem(row, 1, QTableWidgetItem(vid))
-                self.table.setItem(row, 2, QTableWidgetItem(line))
+                self.table.setItem(row, 2, QTableWidgetItem(f"{email} | {link[:50]}..."))
                 self.table.setItem(row, 3, QTableWidgetItem("Ready"))
                 self.table.setItem(row, 4, QTableWidgetItem(""))
+                
+                # 存储完整line用于后续处理
+                self.table.item(row, 2).setData(Qt.ItemDataRole.UserRole, line)
+                
                 self.vid_row_map[vid] = row
                 row += 1
     
@@ -188,10 +204,11 @@ class SheerIDWindow(QDialog):
             chk = self.table.item(row, 0)
             if chk.checkState() == Qt.CheckState.Checked:
                 vid = self.table.item(row, 1).text()
-                line = self.table.item(row, 2).text()
+                # 从UserRole获取完整的line数据
+                line = self.table.item(row, 2).data(Qt.ItemDataRole.UserRole)
+                if not line:
+                    line = self.table.item(row, 2).text()
                 
-                # Optional: Filter out already success to prevent redundant calls?
-                # User might want to re-check, so proceed.
                 links_data.append({'vid': vid, 'line': line})
                 
                 self.table.setItem(row, 3, QTableWidgetItem("Pending"))

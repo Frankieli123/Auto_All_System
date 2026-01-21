@@ -29,41 +29,38 @@ def get_api():
     return _api_instance
 
 
-def read_proxies(file_path: str) -> list:
+def read_proxies(file_path: str = None) -> list:
     """
-    读取代理信息文件
+    从数据库读取代理信息（兼容旧接口，file_path参数已弃用）
     
     Args:
-        file_path: 代理文件路径
+        file_path: [已弃用] 代理文件路径，保留仅为兼容性
         
     Returns:
         代理列表，每个代理为字典格式 {'type': 'socks5', 'host': '', 'port': '', 'username': '', 'password': ''}
-        如果没有代理则返回空列表
     """
-    proxies = []
-    
-    if not os.path.exists(file_path):
-        return proxies
-    
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                match = re.match(r'^socks5://([^:]+):([^@]+)@([^:]+):(\d+)$', line)
-                if match:
-                    proxies.append({
-                        'type': 'socks5',
-                        'host': match.group(3),
-                        'port': match.group(4),
-                        'username': match.group(1),
-                        'password': match.group(2)
-                    })
-    except Exception:
-        pass
-    
-    return proxies
+        from database import DBManager
+        DBManager.init_db()
+        
+        db_proxies = DBManager.get_available_proxies()
+        
+        # 转换为旧格式
+        proxies = []
+        for p in db_proxies:
+            proxies.append({
+                'type': p.get('proxy_type', 'socks5'),
+                'host': p.get('host', ''),
+                'port': p.get('port', ''),
+                'username': p.get('username', ''),
+                'password': p.get('password', ''),
+                'id': p.get('id')  # 保留ID用于标记已使用
+            })
+        
+        return proxies
+    except Exception as e:
+        print(f"[警告] 从数据库读取代理失败: {e}")
+        return []
 
 
 def read_separator_config(file_path: str) -> str:
@@ -542,6 +539,14 @@ def create_browser_window(account: dict, reference_browser_id: str = None, proxy
                         api._request('browser/update/partial', twofa_data)
                     except Exception:
                         pass
+            
+            # 如果使用了代理，标记代理已使用
+            if proxy and proxy.get('id'):
+                try:
+                    from database import DBManager
+                    DBManager.mark_proxy_used(proxy['id'], account['email'])
+                except Exception as e:
+                    print(f"[警告] 标记代理已使用失败: {e}")
             
             return browser_id, None
         

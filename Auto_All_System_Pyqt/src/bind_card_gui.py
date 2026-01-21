@@ -109,6 +109,14 @@ class BindCardWorker(QThread):
             if success:
                 self.progress_signal.emit(browser_id, "✅ 成功", message)
                 self.log_signal.emit(f"[{index}] ✅ {email}: {message}")
+                
+                # 更新卡片使用计数
+                if card_info and card_info.get('id'):
+                    try:
+                        from database import DBManager
+                        DBManager.increment_card_usage(card_info['id'])
+                    except Exception as e:
+                        self.log_signal.emit(f"[{index}] ⚠️ 更新卡片使用计数失败: {e}")
             else:
                 self.progress_signal.emit(browser_id, "❌ 失败", message)
                 self.log_signal.emit(f"[{index}] ❌ {email}: {message}")
@@ -306,46 +314,36 @@ class BindCardWindow(QWidget):
         self.setLayout(layout)
     
     def load_cards(self):
-        """加载 cards.txt 文件"""
-        # 获取数据目录路径
-        if getattr(sys, 'frozen', False):
-            # 打包后，cards.txt 在 exe 同级目录
-            base_path = os.path.dirname(sys.executable)
-        else:
-            # 开发时，cards.txt 在 data/ 目录
-            src_dir = os.path.dirname(os.path.abspath(__file__))
-            base_path = os.path.join(os.path.dirname(src_dir), 'data')
-        
-        cards_path = os.path.join(base_path, "cards.txt")
-        
+        """从数据库加载可用卡片"""
         self.cards = []
         
-        if not os.path.exists(cards_path):
-            self.card_count_label.setText("卡片数量: 0 (cards.txt 不存在)")
-            self.log("⚠️ cards.txt 文件不存在，请创建该文件")
-            return
-        
         try:
-            with open(cards_path, 'r', encoding='utf-8') as f:
-                lines = [l.strip() for l in f.readlines() if l.strip()]
+            DBManager.init_db()
+            db_cards = DBManager.get_available_cards()
             
-            for line in lines:
-                parts = line.split()
-                if len(parts) >= 4:
-                    card = {
-                        'number': parts[0].strip(),
-                        'exp_month': parts[1].strip(),
-                        'exp_year': parts[2].strip(),
-                        'cvv': parts[3].strip()
-                    }
-                    self.cards.append(card)
+            for card in db_cards:
+                self.cards.append({
+                    'id': card['id'],
+                    'number': card['card_number'],
+                    'exp_month': card['exp_month'],
+                    'exp_year': card['exp_year'],
+                    'cvv': card['cvv'],
+                    'holder_name': card.get('holder_name'),
+                    'max_usage': card.get('max_usage', 1),
+                    'usage_count': card.get('usage_count', 0)
+                })
             
             self.card_count_label.setText(f"卡片数量: {len(self.cards)}")
-            self.log(f"✅ 成功加载 {len(self.cards)} 张卡片")
+            self.log(f"✅ 从数据库加载了 {len(self.cards)} 张可用卡片")
+            
+            if not self.cards:
+                self.log("⚠️ 数据库中没有可用卡片，请在Web管理后台导入卡片")
             
         except Exception as e:
             self.card_count_label.setText(f"卡片数量: 0 (加载失败)")
             self.log(f"❌ 加载卡片失败: {e}")
+            import traceback
+            traceback.print_exc()
     
     def load_accounts(self):
         """从数据库加载已验证未绑卡的账号，并匹配浏览器ID"""

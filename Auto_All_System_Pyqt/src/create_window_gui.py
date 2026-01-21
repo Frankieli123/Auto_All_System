@@ -494,10 +494,9 @@ class WorkerThread(QThread):
             
             self.log(f"[信息] 从数据库找到 {len(accounts)} 个待创建窗口的账户")
             
-            # 读取代理信息
-            proxies_file = 'proxies.txt'
-            proxies = read_proxies(proxies_file)
-            self.log(f"[信息] 找到 {len(proxies)} 个代理")
+            # 从数据库读取代理信息
+            proxies = read_proxies()
+            self.log(f"[信息] 从数据库读取到 {len(proxies)} 个可用代理")
             
             # 获取参考窗口信息
             if template_config:
@@ -839,12 +838,12 @@ class BrowserWindowCreatorGUI(QMainWindow):
         input_layout3.addWidget(self.extra_url_input)
         config_layout.addLayout(input_layout3)
         
-        # 文件路径提示
+        # 数据库状态提示
         file_info_layout = QHBoxLayout()
-        self.accounts_label = QLabel("✅ accounts.txt")
-        self.accounts_label.setStyleSheet("color: green;")
-        self.proxies_label = QLabel("✅ proxies.txt")
-        self.proxies_label.setStyleSheet("color: green;")
+        self.accounts_label = QLabel("📊 账号来源: 数据库")
+        self.accounts_label.setStyleSheet("color: #2196F3;")
+        self.proxies_label = QLabel("📊 代理来源: 数据库")
+        self.proxies_label.setStyleSheet("color: #2196F3;")
         file_info_layout.addWidget(self.accounts_label)
         file_info_layout.addWidget(self.proxies_label)
         file_info_layout.addStretch()
@@ -955,16 +954,30 @@ class BrowserWindowCreatorGUI(QMainWindow):
         self.check_files()
 
     def check_files(self):
-        """检查文件是否存在并更新UI"""
-        accounts_exists = os.path.exists('accounts.txt')
-        proxies_exists = os.path.exists('proxies.txt')
-        
-        if not accounts_exists:
-            self.accounts_label.setText("❌ accounts.txt 缺失")
+        """检查数据库状态并更新UI"""
+        try:
+            from database import DBManager
+            DBManager.init_db()
+            
+            # 检查账号数量
+            accounts = DBManager.get_accounts_without_browser()
+            self.accounts_label.setText(f"📊 待创建窗口账号: {len(accounts)}")
+            if len(accounts) == 0:
+                self.accounts_label.setStyleSheet("color: orange;")
+            else:
+                self.accounts_label.setStyleSheet("color: green;")
+            
+            # 检查代理数量
+            proxies = DBManager.get_available_proxies()
+            self.proxies_label.setText(f"📊 可用代理: {len(proxies)}")
+            if len(proxies) == 0:
+                self.proxies_label.setStyleSheet("color: orange;")
+            else:
+                self.proxies_label.setStyleSheet("color: green;")
+                
+        except Exception as e:
+            self.accounts_label.setText("❌ 数据库异常")
             self.accounts_label.setStyleSheet("color: red;")
-        if not proxies_exists:
-            self.proxies_label.setText("⚠️ proxies.txt 未找到")
-            self.proxies_label.setStyleSheet("color: orange;")
 
     def log(self, message):
         """添加日志"""

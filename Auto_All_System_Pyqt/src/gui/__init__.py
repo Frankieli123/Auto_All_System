@@ -11,6 +11,7 @@ from .base_window import (
     get_data_path,
 )
 from .main_window import MainWindow, main
+from .worker_thread import WorkerThread
 
 __all__ = [
     # 基础类
@@ -21,5 +22,8 @@ __all__ = [
     # 主窗口
     'MainWindow',
     'main',
+    # 工作线程
+    'WorkerThread',
 ]
+
 

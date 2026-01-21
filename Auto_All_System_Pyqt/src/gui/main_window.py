@@ -858,8 +858,12 @@ class MainWindow(QMainWindow):
     def _stop_task(self):
         """停止当前任务"""
         self._stop_flag = True
-        self.log("⚠️ 正在停止任务..."
-                 )
+        self.log("⚠️ 正在停止任务...")
+        
+        # 停止工作线程（如果存在）
+        if hasattr(self, '_worker') and self._worker is not None:
+            self._worker.stop()
+        
         self.btn_stop.setEnabled(False)
     
     # ==================== Google专区功能 ====================
@@ -888,74 +892,24 @@ class MainWindow(QMainWindow):
         self._stop_flag = False
         self.btn_stop.setEnabled(True)
         
-        try:
-            from google.backend.sheerlink_service import extract_sheerlink_batch
-            
-            stats = {
-                'link_unverified': 0,
-                'link_verified': 0,
-                'subscribed': 0,
-                'ineligible': 0,
-                'error': 0
-            }
-            
-            def on_result(browser_id, success, message):
-                if success:
-                    self.log(f"  ✅ {browser_id[:12]}...: {message}")
-                else:
-                    self.log(f"  ❌ {browser_id[:12]}...: {message}")
-                
-                # 统计分类
-                if "Verified" in message or "Get Offer" in message:
-                    stats['link_verified'] += 1
-                elif "Link Found" in message or "提取成功" in message:
-                    stats['link_unverified'] += 1
-                elif "Subscribed" in message or "已绑卡" in message:
-                    stats['subscribed'] += 1
-                elif "无资格" in message or "Not Available" in message:
-                    stats['ineligible'] += 1
-                else:
-                    stats['error'] += 1
-                
-                QApplication.processEvents()
-            
-            def stop_check():
-                return self._stop_flag
-            
-            # 执行批量提取
-            result = extract_sheerlink_batch(
-                browser_ids=selected_ids,
-                thread_count=1,  # 单线程，更稳定
-                callback=on_result,
-                stop_check=stop_check,
-                log_callback=lambda msg: self.log(f"  {msg}")
-            )
-            
-            # 显示统计报告
-            summary = (
-                f"\n📊 任务统计报告:\n"
-                f"--------------------------------\n"
-                f"🔗 有资格待验证:   {stats['link_unverified']}\n"
-                f"✅ 已过验证未绑卡: {stats['link_verified']}\n"
-                f"💳 已过验证已绑卡: {stats['subscribed']}\n"
-                f"❌ 无资格 (不可用): {stats['ineligible']}\n"
-                f"⏳ 超时/错误:      {stats['error']}\n"
-                f"--------------------------------\n"
-                f"总计处理: {result.get('processed', 0)}/{len(selected_ids)}"
-            )
-            self.log(summary)
-            
-            if self._stop_flag:
-                self.log("\n⚠️ 任务已被用户停止")
-            
-            self._refresh_browser_list()
-            
-        except Exception as e:
-            self.log(f"SheerLink提取失败: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            self.btn_stop.setEnabled(False)
+        # 使用工作线程避免阻塞主界面
+        from gui.worker_thread import WorkerThread
+        
+        self._worker = WorkerThread('sheerlink', ids=selected_ids, thread_count=1)
+        self._worker.log_signal.connect(self.log)
+        self._worker.finished_signal.connect(self._on_sheerlink_finished)
+        self._worker.start()
+    
+    def _on_sheerlink_finished(self, result: dict):
+        """SheerLink任务完成回调"""
+        self.btn_stop.setEnabled(False)
+        self._refresh_browser_list()
+        
+        if self._stop_flag:
+            self.log("\n⚠️ 任务已被用户停止")
+        else:
+            self.log(f"\n✅ SheerLink提取完成，成功 {result.get('count', 0)} 个")
+
 
     
     def _action_verify_sheerid(self):

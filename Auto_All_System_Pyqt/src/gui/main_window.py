@@ -688,6 +688,7 @@ class MainWindow(QMainWindow):
         """执行创建窗口"""
         try:
             from core.database import DBManager
+            from core.bit_api import create_browsers_batch, get_browser_info
             
             # 获取待创建窗口的账号
             accounts = DBManager.get_accounts_without_browser()
@@ -696,19 +697,17 @@ class MainWindow(QMainWindow):
                 return
             
             # 获取可用代理
-            proxies = DBManager.get_available_proxies()
-            
-            # 确保_legacy目录在路径中
-            _legacy_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '_legacy')
-            if _legacy_dir not in sys.path:
-                sys.path.insert(0, _legacy_dir)
-            
-            # 导入创建窗口函数
-            try:
-                from create_window import create_browser_window, get_browser_info, get_next_window_name
-            except ImportError as e:
-                self.log(f"❌ 无法导入create_window模块: {e}")
-                return
+            proxies_db = DBManager.get_available_proxies()
+            proxies = [
+                {
+                    'type': p.get('proxy_type', 'socks5'),
+                    'host': p.get('host', ''),
+                    'port': str(p.get('port', '')),
+                    'username': p.get('username', ''),
+                    'password': p.get('password', '')
+                }
+                for p in proxies_db
+            ] if proxies_db else None
             
             # 禁用按钮
             self.btn_create_template.setEnabled(False)
@@ -716,91 +715,67 @@ class MainWindow(QMainWindow):
             self.btn_stop.setEnabled(True)
             self._stop_flag = False
             
-            # 获取模板信息
-            template_config = None
+            # 获取配置
             prefix = self.prefix_input.text().strip() or "默认模板"
+            platform_url = self.platform_input.text().strip()
+            extra_url = self.extra_url_input.text().strip()
             
-            if template_id:
+            # 如果使用模板ID，获取模板信息推断前缀
+            if template_id and not self.prefix_input.text().strip():
                 template_info = get_browser_info(template_id)
                 if template_info:
                     ref_name = template_info.get('name', '')
-                    if ref_name and not self.prefix_input.text().strip():
+                    if ref_name:
                         if '_' in ref_name:
                             prefix = '_'.join(ref_name.split('_')[:-1])
                         else:
                             prefix = ref_name
-                    template_config = template_info
-                else:
-                    self.log(f"⚠️ 模板 {template_id} 不存在，使用默认配置")
             
             self.log(f"准备创建 {len(accounts)} 个窗口，前缀: {prefix}")
             
-            # 获取额外配置
-            platform_url = self.platform_input.text().strip()
-            extra_url = self.extra_url_input.text().strip()
-            
-            created_count = 0
-            proxy_index = 0
-            
-            for i, acc in enumerate(accounts):
-                if self._stop_flag:
-                    self.log("\n⚠️ 任务已停止")
-                    break
-                    
-                email = acc.get('email', '')
-                
-                # 构建账号字典（兼容legacy格式）
-                account_dict = {
+            # 转换账号格式
+            accounts_list = [
+                {
                     'email': acc.get('email', ''),
                     'password': acc.get('password', ''),
                     'backup_email': acc.get('recovery_email', ''),
                     '2fa_secret': acc.get('secret_key', '')
                 }
-                
-                # 分配代理
-                proxy_info = None
-                if proxies and proxy_index < len(proxies):
-                    proxy = proxies[proxy_index]
-                    proxy_index += 1
-                    proxy_info = {
-                        'id': proxy.get('id'),
-                        'type': proxy.get('proxy_type', 'socks5'),
-                        'host': proxy.get('host', ''),
-                        'port': str(proxy.get('port', '')),
-                        'username': proxy.get('username', ''),
-                        'password': proxy.get('password', '')
-                    }
-                
-                self.log(f"[{i+1}/{len(accounts)}] 创建窗口: {email}")
-                QApplication.processEvents()  # 刷新UI
-                
-                try:
-                    # 调用legacy的create_browser_window
-                    browser_id, error = create_browser_window(
-                        account=account_dict,
-                        reference_browser_id=template_id,
-                        proxy=proxy_info,
-                        platform=platform_url,
-                        extra_url=extra_url,
-                        name_prefix=prefix,
-                        template_config=template_config
-                    )
-                    
-                    if browser_id:
-                        self.log(f"  ✅ 创建成功: {browser_id}")
-                        
-                        # 更新数据库中账号的browser_id
-                        DBManager.update_account_browser_id(email, browser_id)
-                        created_count += 1
-                    else:
-                        self.log(f"  ❌ 创建失败: {error}")
-                        
-                except Exception as e:
-                    self.log(f"  ❌ 创建出错: {e}")
-                    import traceback
-                    traceback.print_exc()
+                for acc in accounts
+            ]
             
-            self.log(f"\n创建完成，成功 {created_count}/{len(accounts)} 个")
+            created_count = 0
+            
+            def on_create(index, account, browser_id, error):
+                nonlocal created_count
+                email = account.get('email', '')
+                if browser_id:
+                    self.log(f"  [{index+1}/{len(accounts)}] ✅ {email} -> {browser_id}")
+                    DBManager.update_account_browser_id(email, browser_id)
+                    created_count += 1
+                else:
+                    self.log(f"  [{index+1}/{len(accounts)}] ❌ {email}: {error}")
+                QApplication.processEvents()
+            
+            def stop_check():
+                return self._stop_flag
+            
+            # 批量创建
+            success, total = create_browsers_batch(
+                accounts=accounts_list,
+                name_prefix=prefix,
+                template_id=template_id,
+                proxies=proxies,
+                platform_url=platform_url,
+                extra_url=extra_url,
+                callback=on_create,
+                stop_check=stop_check
+            )
+            
+            if self._stop_flag:
+                self.log(f"\n⚠️ 任务已停止")
+            
+            self.log(f"\n创建完成，成功 {created_count}/{total} 个")
             self._refresh_browser_list()
             self._check_files()
             
@@ -813,6 +788,7 @@ class MainWindow(QMainWindow):
             self.btn_create_template.setEnabled(True)
             self.btn_create_default.setEnabled(True)
             self.btn_stop.setEnabled(False)
+
     
     def _stop_task(self):
         """停止当前任务"""

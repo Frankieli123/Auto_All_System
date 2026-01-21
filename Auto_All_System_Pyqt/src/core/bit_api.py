@@ -709,6 +709,195 @@ def get_next_window_name(prefix: str) -> str:
     return f"{prefix}_{max_num + 1}"
 
 
+# ==================== 默认模板配置 ====================
+
+DEFAULT_BROWSER_TEMPLATE = {
+    "browserFingerPrint": {
+        "coreVersion": "140",
+        "version": "140",
+        "ostype": "PC",
+        "os": "Win32",
+        "osVersion": "10"
+    },
+    "proxyMethod": 2,
+    "proxyType": "noproxy",
+    "syncTabs": True,
+    "syncCookies": True,
+    "syncIndexedDb": True,
+    "syncLocalStorage": True,
+    "syncBookmarks": True,
+    "syncAuthorization": True, 
+    "syncHistory": True,
+    "syncExtensions": True
+}
+
+
+def create_browser_from_account(
+    account: Dict,
+    name_prefix: str = "默认模板",
+    template_config: Optional[Dict] = None,
+    template_id: Optional[str] = None,
+    proxy: Optional[Dict] = None,
+    platform_url: str = "",
+    extra_url: str = ""
+) -> tuple:
+    """
+    @brief 根据账号创建浏览器窗口
+    @param account 账号信息字典，需包含email, password, 可选backup_email, 2fa_secret
+    @param name_prefix 窗口名称前缀
+    @param template_config 模板配置（优先级高于template_id）
+    @param template_id 模板窗口ID
+    @param proxy 代理信息字典，需包含type, host, port, username, password
+    @param platform_url 平台URL
+    @param extra_url 额外URL
+    @return (browser_id, error_message)
+    """
+    api = get_api()
+    
+    # 确定模板配置
+    if template_config:
+        base_config = template_config.copy()
+    elif template_id:
+        result = api.get_browser_detail(template_id)
+        if result.get('success'):
+            base_config = result.get('data', {})
+        else:
+            return None, f"找不到模板窗口: {template_id}"
+    else:
+        # 使用默认模板
+        base_config = DEFAULT_BROWSER_TEMPLATE.copy()
+    
+    # 构建请求数据
+    json_data = {}
+    exclude_fields = {'id', 'name', 'remark', 'userName', 'password', 'faSecretKey', 
+                      'createTime', 'updateTime', 'seq', 'groupId'}
+    
+    for key, value in base_config.items():
+        if key not in exclude_fields:
+            json_data[key] = value
+    
+    # 设置窗口名称
+    json_data['name'] = get_next_window_name(name_prefix)
+    
+    # 设置备注（格式：email----password----backup_email----2fa_secret）
+    email = account.get('email', '')
+    password = account.get('password', '')
+    backup_email = account.get('backup_email', account.get('recovery_email', ''))
+    secret = account.get('2fa_secret', account.get('secret_key', ''))
+    
+    remark_parts = [email, password, backup_email, secret]
+    json_data['remark'] = '----'.join(remark_parts)
+    
+    # 设置账号信息
+    if email:
+        json_data['userName'] = email
+    if password:
+        json_data['password'] = password
+    if secret and secret.strip():
+        json_data['faSecretKey'] = secret.strip()
+    
+    # 设置平台和额外URL
+    if platform_url:
+        json_data['platform'] = platform_url
+    if extra_url:
+        json_data['url'] = extra_url
+    
+    # 确保有指纹配置
+    if 'browserFingerPrint' not in json_data:
+        json_data['browserFingerPrint'] = DEFAULT_BROWSER_TEMPLATE['browserFingerPrint'].copy()
+    
+    # 设置代理
+    if proxy:
+        json_data['proxyType'] = proxy.get('type', 'socks5')
+        json_data['proxyMethod'] = 2
+        json_data['host'] = proxy.get('host', '')
+        json_data['port'] = str(proxy.get('port', ''))
+        json_data['proxyUserName'] = proxy.get('username', '')
+        json_data['proxyPassword'] = proxy.get('password', '')
+    else:
+        json_data['proxyType'] = 'noproxy'
+        json_data['proxyMethod'] = 2
+    
+    # 检查是否已存在该账号的窗口
+    browsers = get_browser_list_simple(page=0, page_size=1000)
+    for b in browsers:
+        if b.get('userName') == email and email:
+            return None, f"该账号已有对应窗口: {b.get('name')} (ID: {b.get('id')})"
+    
+    # 创建窗口
+    try:
+        result = api._request('/browser/update', json_data, timeout=30)
+        
+        if result.get('success'):
+            browser_id = result.get('data', {}).get('id')
+            if not browser_id:
+                return None, "API返回成功但未获取到ID"
+            return browser_id, None
+        else:
+            return None, result.get('msg', '创建失败')
+    except Exception as e:
+        return None, f"请求异常: {str(e)}"
+
+
+def create_browsers_batch(
+    accounts: List[Dict],
+    name_prefix: str = "默认模板",
+    template_config: Optional[Dict] = None,
+    template_id: Optional[str] = None,
+    proxies: Optional[List[Dict]] = None,
+    platform_url: str = "",
+    extra_url: str = "",
+    callback=None,
+    stop_check=None
+) -> tuple:
+    """
+    @brief 批量创建浏览器窗口
+    @param accounts 账号列表
+    @param name_prefix 窗口名称前缀
+    @param template_config 模板配置
+    @param template_id 模板窗口ID
+    @param proxies 代理列表
+    @param platform_url 平台URL
+    @param extra_url 额外URL
+    @param callback 回调函数 callback(index, account, browser_id, error)
+    @param stop_check 停止检查函数 stop_check() -> bool
+    @return (success_count, total_count)
+    """
+    success_count = 0
+    proxy_index = 0
+    
+    for i, account in enumerate(accounts):
+        # 检查停止标志
+        if stop_check and stop_check():
+            break
+        
+        # 分配代理
+        proxy = None
+        if proxies and proxy_index < len(proxies):
+            proxy = proxies[proxy_index]
+            proxy_index += 1
+        
+        # 创建窗口
+        browser_id, error = create_browser_from_account(
+            account=account,
+            name_prefix=name_prefix,
+            template_config=template_config,
+            template_id=template_id,
+            proxy=proxy,
+            platform_url=platform_url,
+            extra_url=extra_url
+        )
+        
+        if browser_id:
+            success_count += 1
+        
+        # 回调
+        if callback:
+            callback(i, account, browser_id, error)
+    
+    return success_count, len(accounts)
+
+
 if __name__ == "__main__":
     # 测试代码
     api = BitBrowserAPI()
@@ -723,3 +912,4 @@ if __name__ == "__main__":
         print(f"窗口数量: {len(browsers)}")
         for browser in browsers[:3]:
             print(f"  - {browser.get('name')} (ID: {browser.get('id')})")
+

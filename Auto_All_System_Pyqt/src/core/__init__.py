@@ -23,6 +23,10 @@ try:
         delete_browsers_batch,
         get_browser_info,
         get_next_window_name,
+        # 创建窗口函数
+        create_browser_from_account,
+        create_browsers_batch,
+        DEFAULT_BROWSER_TEMPLATE,
     )
     from .bit_playwright import google_login
 except ImportError as e:
@@ -31,6 +35,7 @@ except ImportError as e:
     get_api = openBrowser = closeBrowser = createBrowser = deleteBrowser = None
     get_browser_list_simple = open_browsers_batch = delete_browsers_batch = None
     get_browser_info = get_next_window_name = None
+    create_browser_from_account = create_browsers_batch = DEFAULT_BROWSER_TEMPLATE = None
     google_login = None
 
 __all__ = [
@@ -47,5 +52,9 @@ __all__ = [
     'delete_browsers_batch',
     'get_browser_info',
     'get_next_window_name',
+    'create_browser_from_account',
+    'create_browsers_batch',
+    'DEFAULT_BROWSER_TEMPLATE',
     'google_login',
 ]
+

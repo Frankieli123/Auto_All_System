@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 from playwright.async_api import async_playwright
-from bit_api import openBrowser, closeBrowser
+from browser_api import openBrowser, closeBrowser
 from create_window import get_browser_info, get_browser_list
 from database import DBManager
 from sheerid_verifier import SheerIDVerifier

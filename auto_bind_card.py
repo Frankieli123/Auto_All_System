@@ -4,7 +4,7 @@
 import asyncio
 import pyotp
 from playwright.async_api import async_playwright, Page
-from bit_api import openBrowser, closeBrowser
+from browser_api import openBrowser, closeBrowser
 from account_manager import AccountManager
 
 # 测试卡信息

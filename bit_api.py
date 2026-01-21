@@ -1,13 +1,14 @@
 import requests
 import json
 import time
+import os
 
 # 官方文档地址
 # https://doc2.bitbrowser.cn/jiekou/ben-di-fu-wu-zhi-nan.html
 
 # 此demo仅作为参考使用，以下使用的指纹参数仅是部分参数，完整参数请参考文档
 
-url = "http://127.0.0.1:54345"
+url = os.getenv("BITBROWSER_API_URL", "http://127.0.0.1:54345").rstrip("/")
 headers = {'Content-Type': 'application/json'}
 
 

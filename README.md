@@ -77,6 +77,24 @@
    python create_window_gui.py
    ```
 
+### 可选：切换到 GeekEZ Browser 后端（保持 BitBrowser 兼容）
+
+默认仍使用 BitBrowser（不破坏原有对接）。如需把“窗口后端”切换为 GeekEZ：
+
+1. 先编译/启动 GeekEZ（独立应用，单独仓库）：
+   ```bash
+   git clone https://github.com/Frankieli123/GeekezBrowser.git
+   cd GeekezBrowser
+   npm install
+   npm run start
+   ```
+2. 设置环境变量后再启动本项目：
+   - `BROWSER_BACKEND=geekez`
+   - GeekEZ 本机 API 默认端口：`17555`（可用 `GEEKEZ_API_PORT` 或 `GEEKEZ_API_URL` 覆盖）
+   - BitBrowser 本机 API 默认端口：`54345`（可用 `BITBROWSER_API_URL` 覆盖）
+
+注意：GeekEZ 的许可证为 `CC BY-NC-SA 4.0`（非商业/同协议分享），请先评估你的使用场景。
+
 ## ⚙️ 配置文件说明 (Configuration)
 
 请在程序运行目录下创建以下文件：

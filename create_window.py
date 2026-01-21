@@ -10,9 +10,10 @@ import re
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from backend_config import is_geekez_backend, get_bitbrowser_api_url, get_geekez_api_url
 
 # 比特浏览器API地址
-url = "http://127.0.0.1:54345"
+url = get_bitbrowser_api_url()
 headers = {'Content-Type': 'application/json'}
 
 
@@ -38,15 +39,19 @@ def read_proxies(file_path: str) -> list:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                match = re.match(r'^socks5://([^:]+):([^@]+)@([^:]+):(\d+)$', line)
+                match = re.match(r'^(socks5|http|https)://([^:]+):([^@]+)@([^:]+):(\d+)$', line)
                 if match:
                     proxies.append({
-                        'type': 'socks5',
-                        'host': match.group(3),
-                        'port': match.group(4),
-                        'username': match.group(1),
-                        'password': match.group(2)
+                        'type': match.group(1),
+                        'host': match.group(4),
+                        'port': match.group(5),
+                        'username': match.group(2),
+                        'password': match.group(3),
+                        'raw': line,
                     })
+                else:
+                    # GeekEZ 支持多协议（vmess/vless/trojan/...），这里保留原始字符串供后端使用
+                    proxies.append({'raw': line})
     except Exception:
         pass
     
@@ -123,17 +128,24 @@ def parse_account_line(line: str, separator: str) -> dict:
         'full_line': line
     }
     
-    # 按固定顺序分配字段
-    # 格式: 邮箱 [分隔符] 密码 [分隔符] 辅助邮箱 [分隔符] 2FA密钥
+    # 支持两种常见格式：
+    # 1) 邮箱----密码----辅助邮箱----2FA密钥
+    # 2) 邮箱----密码----2FA密钥（无辅助邮箱）
     if len(parts) >= 1:
         result['email'] = parts[0]
     if len(parts) >= 2:
         result['password'] = parts[1]
-    if len(parts) >= 3:
-        result['backup_email'] = parts[2]
+
     if len(parts) >= 4:
+        result['backup_email'] = parts[2]
         result['2fa_secret'] = parts[3]
-    
+    elif len(parts) == 3:
+        third = parts[2]
+        if '@' in third and '.' in third:
+            result['backup_email'] = third
+        else:
+            result['2fa_secret'] = third
+
     return result if result['email'] else None
 
 
@@ -196,6 +208,20 @@ def get_browser_list(page: int = 0, pageSize: int = 50):
     Returns:
         窗口列表
     """
+    if is_geekez_backend():
+        try:
+            base = get_geekez_api_url().rstrip('/')
+            res = requests.get(f"{base}/profiles", timeout=5).json()
+            if res.get('success') is True:
+                profiles = (res.get('data') or {}).get('list') or []
+                if pageSize and pageSize > 0:
+                    start = page * pageSize
+                    end = start + pageSize
+                    return profiles[start:end]
+                return profiles
+        except Exception:
+            return []
+
     try:
         json_data = {
             'page': page,
@@ -249,6 +275,15 @@ def delete_browsers_by_name(name_pattern: str):
     Returns:
         删除的窗口数量
     """
+    if is_geekez_backend():
+        browsers = get_browser_list(page=0, pageSize=100000)
+        deleted_count = 0
+        for browser in browsers:
+            if browser.get('name') == name_pattern:
+                if delete_browser_by_id(str(browser.get('id', ''))):
+                    deleted_count += 1
+        return deleted_count
+
     browsers = get_browser_list()
     deleted_count = 0
     
@@ -281,6 +316,19 @@ def open_browser_by_id(browser_id: str):
     Returns:
         bool: 是否调用成功
     """
+    if is_geekez_backend():
+        try:
+            base = get_geekez_api_url().rstrip('/')
+            res = requests.post(
+                f"{base}/profiles/{browser_id}/open",
+                json={"watermarkStyle": "enhanced"},
+                headers=headers,
+                timeout=30,
+            ).json()
+            return res.get('success') is True
+        except Exception:
+            return False
+
     try:
         res = requests.post(
             f"{url}/browser/open",
@@ -306,6 +354,14 @@ def delete_browser_by_id(browser_id: str):
     Returns:
         bool: 是否删除成功
     """
+    if is_geekez_backend():
+        try:
+            base = get_geekez_api_url().rstrip('/')
+            res = requests.delete(f"{base}/profiles/{browser_id}", timeout=30).json()
+            return res.get('success') is True
+        except Exception:
+            return False
+
     try:
         res = requests.post(
             f"{url}/browser/delete",
@@ -399,6 +455,83 @@ def create_browser_window(account: dict, reference_browser_id: str = None, proxy
     Returns:
         (browser_id, error_message)
     """
+    if is_geekez_backend():
+        try:
+            base = get_geekez_api_url().rstrip('/')
+
+            # 确定窗口名称前缀
+            if name_prefix:
+                final_prefix = name_prefix
+            else:
+                ref_name = ''
+                if isinstance(template_config, dict):
+                    ref_name = str(template_config.get('name', '') or '')
+                if not ref_name and reference_browser_id:
+                    ref = get_browser_info(reference_browser_id)
+                    if ref:
+                        ref_name = str(ref.get('name', '') or '')
+                if '_' in ref_name:
+                    ref_name = '_'.join(ref_name.split('_')[:-1])
+                final_prefix = ref_name or 'GeekEZ'
+
+            window_name = get_next_window_name(final_prefix)
+
+            # 代理字符串：优先使用 raw（支持 vmess/vless/trojan/...）
+            proxy_str = ''
+            if proxy:
+                proxy_str = str(proxy.get('raw', '') or '').strip()
+                if not proxy_str and proxy.get('host') and proxy.get('port'):
+                    t = proxy.get('type', 'socks5')
+                    u = proxy.get('username', '')
+                    p = proxy.get('password', '')
+                    h = proxy.get('host', '')
+                    port = proxy.get('port', '')
+                    if u:
+                        proxy_str = f"{t}://{u}:{p}@{h}:{port}"
+                    else:
+                        proxy_str = f"{t}://{h}:{port}"
+
+            # 模板指纹：GeekEZ profile 使用 fingerprint 字段
+            fingerprint = None
+            ref_fp = None
+            if isinstance(template_config, dict):
+                ref_fp = template_config.get('fingerprint')
+            if not ref_fp and reference_browser_id:
+                ref = get_browser_info(reference_browser_id)
+                if isinstance(ref, dict):
+                    ref_fp = ref.get('fingerprint')
+            if isinstance(ref_fp, dict) and ref_fp:
+                fingerprint = ref_fp
+
+            # 检查是否已存在该账号的窗口（基于 remark 中的邮箱）
+            email = (account.get('email') or '').strip()
+            if email:
+                all_profiles = get_browser_list(page=0, pageSize=100000)
+                for b in all_profiles:
+                    r = str(b.get('remark', '') or '')
+                    if r.startswith(email) or (email in r):
+                        return None, f"该账号已有对应窗口: {b.get('name')} (ID: {b.get('id')})"
+
+            payload = {
+                'name': window_name,
+                'proxyStr': proxy_str,
+                'remark': account.get('full_line', ''),
+            }
+            if fingerprint is not None:
+                payload['fingerprint'] = fingerprint
+
+            res = requests.post(f"{base}/profiles", json=payload, headers=headers, timeout=10).json()
+            if res.get('success') is True:
+                browser_id = (res.get('data') or {}).get('id')
+                if browser_id:
+                    return browser_id, None
+                return None, "创建成功但未返回ID"
+
+            error_msg = res.get('error') or res.get('msg') or '未知API错误'
+            return None, f"创建请求被拒绝: {error_msg}"
+        except Exception as e:
+            return None, f"请求异常: {str(e)}"
+
     if template_config:
         reference_config = template_config
     elif reference_browser_id:
@@ -454,13 +587,13 @@ def create_browser_window(account: dict, reference_browser_id: str = None, proxy
     json_data['browserFingerPrint']['coreVersion'] = '140'
     json_data['browserFingerPrint']['version'] = '140'
     
-    if proxy:
-        json_data['proxyType'] = proxy['type']
+    if proxy and proxy.get('type') and proxy.get('host') and proxy.get('port'):
+        json_data['proxyType'] = proxy.get('type')
         json_data['proxyMethod'] = 2
-        json_data['host'] = proxy['host']
-        json_data['port'] = proxy['port']
-        json_data['proxyUserName'] = proxy['username']
-        json_data['proxyPassword'] = proxy['password']
+        json_data['host'] = proxy.get('host')
+        json_data['port'] = proxy.get('port')
+        json_data['proxyUserName'] = proxy.get('username', '')
+        json_data['proxyPassword'] = proxy.get('password', '')
     else:
         json_data['proxyType'] = 'noproxy'
         json_data['proxyMethod'] = 2

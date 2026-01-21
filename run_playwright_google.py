@@ -6,7 +6,7 @@ import os
 import sys
 import threading
 from playwright.async_api import async_playwright, Playwright
-from bit_api import openBrowser, closeBrowser
+from browser_api import openBrowser, closeBrowser
 from create_window import get_browser_list, get_browser_info
 from deep_translator import GoogleTranslator
 from account_manager import AccountManager
@@ -397,22 +397,24 @@ def process_browser(browser_id, log_callback=None):
 
     account_info = {}
     remark = target_browser.get('remark', '')
-    parts = remark.split('----')
-    if len(parts) >= 4:
-        account_info = {
-            'email': parts[0].strip(),
-            'password': parts[1].strip(),
-            'backup': parts[2].strip(),
-            'secret': parts[3].strip()
-        }
+    parts = [p.strip() for p in remark.split('----') if p.strip()]
+
+    if len(parts) >= 2:
+        account_info['email'] = parts[0].strip()
+        account_info['password'] = parts[1].strip()
+
+        extra = parts[2:]
+        if len(extra) >= 2:
+            account_info['backup'] = extra[0].strip()
+            account_info['secret'] = extra[1].strip()
+        elif len(extra) == 1:
+            # 兼容无辅助邮箱：邮箱----密码----2FA密钥
+            if '@' in extra[0] and '.' in extra[0]:
+                account_info['backup'] = extra[0].strip()
+            else:
+                account_info['secret'] = extra[0].strip()
     else:
-        # Even if password/secret missing, maybe we are already logged in?
-        # But if email is missing, it's hard to log (for the file).
-        # We'll try to get email from remark anyway if partial
-        if len(parts) >= 1:
-             account_info['email'] = parts[0].strip()
-        else:
-             account_info['email'] = 'unknown'
+        account_info['email'] = parts[0].strip() if parts else 'unknown'
         print("Remark format invalid or empty, logging in might fail if credentials needed.")
 
     print(f"Opening browser {browser_id}...")

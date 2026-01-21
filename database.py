@@ -89,15 +89,21 @@ class DBManager:
         rec = None
         sec = None
         
-        # 按固定顺序分配
+        # 支持：邮箱----密码----辅助邮箱----2FA密钥 / 邮箱----密码----2FA密钥
         if len(parts) >= 1:
             email = parts[0]
         if len(parts) >= 2:
             pwd = parts[1]
-        if len(parts) >= 3:
-            rec = parts[2]
+
         if len(parts) >= 4:
+            rec = parts[2]
             sec = parts[3]
+        elif len(parts) == 3:
+            third = parts[2]
+            if '@' in third and '.' in third:
+                rec = third
+            else:
+                sec = third
         
         return email, pwd, rec, sec, link
 

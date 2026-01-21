@@ -21,9 +21,19 @@ class AccountManager:
         for i, p in enumerate(parts):
             if '@' in p and '.' in p:
                 email = p
-                if i+1 < len(parts): pwd = parts[i+1]
-                if i+2 < len(parts): rec = parts[i+2]
-                if i+3 < len(parts): sec = parts[i+3]
+                if i + 1 < len(parts):
+                    pwd = parts[i + 1]
+
+                extra = parts[i + 2:]
+                if len(extra) >= 2:
+                    rec = extra[0]
+                    sec = extra[1]
+                elif len(extra) == 1:
+                    # 兼容无辅助邮箱：邮箱----密码----2FA密钥
+                    if '@' in extra[0] and '.' in extra[0]:
+                        rec = extra[0]
+                    else:
+                        sec = extra[0]
                 break
         
         return email, pwd, rec, sec, link

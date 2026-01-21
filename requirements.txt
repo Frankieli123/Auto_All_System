@@ -2,6 +2,8 @@ PyQt6
 playwright
 requests
 pyotp
+selenium
+deep-translator
 svglib
 reportlab
 Pillow

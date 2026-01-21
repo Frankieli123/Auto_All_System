@@ -362,9 +362,14 @@ class WorkerThread(QThread):
                 secret = None
                 remark = browser.get('remark', '')
                 if remark:
-                    parts = remark.split('----')
+                    parts = [p.strip() for p in remark.split('----') if p.strip()]
                     if len(parts) >= 4:
                         secret = parts[3].strip()
+                    elif len(parts) == 3:
+                        # 兼容无辅助邮箱：邮箱----密码----2FA密钥
+                        third = parts[2].strip()
+                        if not ('@' in third and '.' in third):
+                            secret = third
                 
                 # 如果备注没有，再尝试从字段获取
                 if not secret:

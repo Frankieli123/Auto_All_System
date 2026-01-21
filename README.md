@@ -88,8 +88,10 @@
    npm install
    npm run start
    ```
-2. 设置环境变量后再启动本项目：
-   - `BROWSER_BACKEND=geekez`
+2. 启动本项目后，在主界面顶部可直接点击“切换到 GeekEZ/切换到 BitBrowser”（会写入 `app_settings.json`，下次启动自动生效）。
+
+   仍支持环境变量强制指定（优先级最高）：
+   - `BROWSER_BACKEND=geekez`（或 `bitbrowser`）
    - GeekEZ 本机 API 默认端口：`17555`（可用 `GEEKEZ_API_PORT` 或 `GEEKEZ_API_URL` 覆盖）
    - BitBrowser 本机 API 默认端口：`54345`（可用 `BITBROWSER_API_URL` 覆盖）
 

@@ -8,6 +8,8 @@ UI布局调整：左侧操作区，右侧日志区
 import sys
 import os
 import threading
+import requests
+import backend_config
 import pyotp
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -699,7 +701,7 @@ class BrowserWindowCreatorGUI(QMainWindow):
 
     def init_ui(self):
         """初始化UI"""
-        self.setWindowTitle("比特浏览器窗口管理工具")
+        self.setWindowTitle("浏览器窗口管理工具")
         self.setWindowIcon(QIcon(resource_path("beta-1.svg")))
         self.resize(1300, 800)
         
@@ -748,6 +750,25 @@ class BrowserWindowCreatorGUI(QMainWindow):
         top_bar_layout.addWidget(title_label)
         
         top_bar_layout.addStretch()
+
+        # Browser backend (BitBrowser / GeekEZ)
+        self.backend_status_label = QLabel("")
+        self.backend_status_label.setStyleSheet("color: #333; font-weight: bold;")
+        top_bar_layout.addWidget(self.backend_status_label)
+
+        self.btn_test_backend = QPushButton("测试连接")
+        self.btn_test_backend.setFixedHeight(30)
+        self.btn_test_backend.clicked.connect(self.test_backend_connection)
+        top_bar_layout.addWidget(self.btn_test_backend)
+
+        self.btn_switch_backend = QPushButton("切换后端")
+        self.btn_switch_backend.setFixedHeight(30)
+        self.btn_switch_backend.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_switch_backend.setStyleSheet(
+            "background-color: #FF5722; color: white; border-radius: 4px; padding: 4px 10px;"
+        )
+        self.btn_switch_backend.clicked.connect(self.switch_backend)
+        top_bar_layout.addWidget(self.btn_switch_backend)
         
         # Global Thread Spinbox
         top_bar_layout.addWidget(QLabel("🔥 全局并发数:"))
@@ -761,6 +782,8 @@ class BrowserWindowCreatorGUI(QMainWindow):
         top_bar_layout.addWidget(self.thread_spinbox)
         
         left_layout.addLayout(top_bar_layout)
+
+        self.update_backend_ui_info()
         
         # 2. 配置区域
         config_group = QGroupBox("创建参数配置")
@@ -923,6 +946,58 @@ class BrowserWindowCreatorGUI(QMainWindow):
         if not proxies_exists:
             self.proxies_label.setText("⚠️ proxies.txt 未找到")
             self.proxies_label.setStyleSheet("color: orange;")
+
+    def update_backend_ui_info(self):
+        is_geek = backend_config.is_geekez_backend()
+        name = "GeekEZ" if is_geek else "BitBrowser"
+        api_url = backend_config.get_geekez_api_url() if is_geek else backend_config.get_bitbrowser_api_url()
+        self.backend_status_label.setText(f"后端: {name} | API: {api_url}")
+        self.btn_switch_backend.setText(f"切换到 {'BitBrowser' if is_geek else 'GeekEZ'}")
+        self.setWindowTitle(f"浏览器窗口管理工具（{name}）")
+
+    def switch_backend(self):
+        if self.worker_thread and self.worker_thread.isRunning():
+            QMessageBox.warning(self, "提示", "当前有任务正在运行，请先停止任务再切换后端。")
+            return
+
+        is_geek = backend_config.is_geekez_backend()
+        new_backend = "bitbrowser" if is_geek else "geekez"
+        new_name = "BitBrowser" if new_backend == "bitbrowser" else "GeekEZ"
+
+        reply = QMessageBox.question(
+            self,
+            "确认切换",
+            f"确定要切换到 {new_name} 吗？\n\n切换后会刷新窗口列表；已打开的窗口不会被自动关闭。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        backend_config.set_backend(new_backend)
+        self.update_backend_ui_info()
+        self.refresh_browser_list()
+        QMessageBox.information(self, "切换成功", f"已切换到 {new_name}")
+
+    def test_backend_connection(self):
+        is_geek = backend_config.is_geekez_backend()
+        name = "GeekEZ" if is_geek else "BitBrowser"
+        base = backend_config.get_geekez_api_url() if is_geek else backend_config.get_bitbrowser_api_url()
+
+        try:
+            if is_geek:
+                res = requests.get(f"{base}/health", timeout=3).json()
+                ok = res.get("success") is True
+            else:
+                res = requests.post(f"{base}/browser/list", json={"page": 0, "pageSize": 1}, timeout=3).json()
+                ok = (res.get("code") == 0) or (res.get("success") is True)
+
+            if ok:
+                QMessageBox.information(self, "测试连接", f"✅ 连接 {name} 成功\n{base}")
+            else:
+                QMessageBox.warning(self, "测试连接", f"❌ 连接 {name} 失败\n{base}\n\n响应: {res}")
+        except Exception as e:
+            QMessageBox.critical(self, "测试连接", f"❌ 连接 {name} 异常\n{base}\n\n{e}")
 
     def log(self, message):
         """添加日志"""
@@ -1139,10 +1214,16 @@ class BrowserWindowCreatorGUI(QMainWindow):
         self.open_btn.setEnabled(not running)
         self.btn_2fa.setEnabled(not running)
         self.btn_sheerlink.setEnabled(not running)
+        self.btn_verify_sheerid.setEnabled(not running)
+        self.btn_test_backend.setEnabled(not running)
+        self.btn_switch_backend.setEnabled(not running)
         self.stop_btn.setEnabled(running)
         self.refresh_btn.setEnabled(not running)
         self.template_id_input.setEnabled(not running)
         self.name_prefix_input.setEnabled(not running)
+        self.platform_url_input.setEnabled(not running)
+        self.extra_url_input.setEnabled(not running)
+        self.thread_spinbox.setEnabled(not running)
 
     def start_creation_default(self):
         """使用默认模板开始创建任务"""
@@ -1205,17 +1286,6 @@ class BrowserWindowCreatorGUI(QMainWindow):
         elif result.get('type') == 'verify_sheerid':
             count = result.get('count', 0)
             QMessageBox.information(self, "完成", f"SheerID 批量验证结束\n成功: {count} 个\n结果已保存至 sheerID_verified_success/failed.txt")
-
-    def update_ui_state(self, running):
-        """更新UI按钮状态"""
-        self.start_btn.setEnabled(not running)
-        self.delete_btn.setEnabled(not running)
-        self.open_btn.setEnabled(not running)
-        self.btn_2fa.setEnabled(not running)
-        self.btn_sheerlink.setEnabled(not running)
-        self.btn_verify_sheerid.setEnabled(not running)
-        self.stop_btn.setEnabled(running)
-        self.refresh_btn.setEnabled(not running)
 
 
 def main():

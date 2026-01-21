@@ -331,6 +331,16 @@ class MainWindow(QMainWindow):
         
         layout.addStretch()
         
+        # Web服务器按钮
+        self.btn_web_server = QPushButton("🌐 启动Web服务器")
+        self.btn_web_server.setFixedHeight(30)
+        self.btn_web_server.setStyleSheet("""
+            QPushButton { background-color: #9C27B0; color: white; border-radius: 4px; padding: 5px 10px; }
+            QPushButton:hover { background-color: #7B1FA2; }
+        """)
+        self.btn_web_server.clicked.connect(self._toggle_web_server)
+        layout.addWidget(self.btn_web_server)
+        
         # 全局并发数
         layout.addWidget(QLabel("🔥 全局并发数:"))
         self.thread_spinbox = QSpinBox()
@@ -342,6 +352,33 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.thread_spinbox)
         
         return layout
+    
+    def _toggle_web_server(self):
+        """启动/停止Web服务器"""
+        try:
+            from main import start_web_server, stop_web_server, is_web_server_running
+        except ImportError:
+            self.log("⚠️ 无法导入Web服务器模块")
+            return
+        
+        if is_web_server_running():
+            stop_web_server()
+            self.btn_web_server.setText("🌐 启动Web服务器")
+            self.btn_web_server.setStyleSheet("""
+                QPushButton { background-color: #9C27B0; color: white; border-radius: 4px; padding: 5px 10px; }
+                QPushButton:hover { background-color: #7B1FA2; }
+            """)
+            self.log("🌐 Web服务器已停止")
+        else:
+            if start_web_server(8080):
+                self.btn_web_server.setText("🔴 停止Web服务器")
+                self.btn_web_server.setStyleSheet("""
+                    QPushButton { background-color: #f44336; color: white; border-radius: 4px; padding: 5px 10px; }
+                    QPushButton:hover { background-color: #d32f2f; }
+                """)
+                self.log("🌐 Web服务器已启动: http://localhost:8080")
+            else:
+                self.log("⚠️ Web服务器启动失败")
     
     def _create_config_group(self) -> QGroupBox:
         """创建参数配置区"""
@@ -454,7 +491,7 @@ class MainWindow(QMainWindow):
         # 浏览器表格
         self.browser_table = QTableWidget()
         self.browser_table.setColumnCount(6)
-        self.browser_table.setHorizontalHeaderLabels(["选择", "序号", "名称", "窗口ID", "2FA验证码", "备注"])
+        self.browser_table.setHorizontalHeaderLabels(["选择", "序号", "名称", "窗口ID", "状态", "备注"])
         
         # 设置列宽可拖动（Interactive模式）
         header = self.browser_table.horizontalHeader()
@@ -465,7 +502,7 @@ class MainWindow(QMainWindow):
         self.browser_table.setColumnWidth(1, 50)   # 序号
         self.browser_table.setColumnWidth(2, 120)  # 名称
         self.browser_table.setColumnWidth(3, 280)  # 窗口ID
-        self.browser_table.setColumnWidth(4, 80)   # 2FA验证码
+        self.browser_table.setColumnWidth(4, 100)  # 状态
         self.browser_table.setColumnWidth(5, 200)  # 备注
         
         # 最后一列自动拉伸填充剩余空间
@@ -538,31 +575,35 @@ class MainWindow(QMainWindow):
         self.log("正在刷新窗口列表...")
         try:
             from core.bit_api import get_browser_list_simple
+            from core.database import DBManager
             
             browsers = get_browser_list_simple(page=0, page_size=1000)
-
+            
+            # 获取所有账号状态
+            accounts = {acc['browser_id']: acc for acc in DBManager.get_all_accounts() if acc.get('browser_id')}
             
             self.browser_table.setRowCount(0)
             
-            import pyotp
+            # 状态显示映射
+            status_display = {
+                'pending_check': '❔待检测',
+                'ineligible': '❌无资格',
+                'link_ready': '🔗待验证',
+                'verified': '✅已验证',
+                'subscribed': '👑已订阅',
+                'error': '⚠️错误',
+            }
+            
             for browser in browsers:
                 name = browser.get('name', '')
                 browser_id = browser.get('id', '')
                 remark = browser.get('remark', '')
                 seq = browser.get('seq', '')
                 
-                # 生成2FA验证码
-                totp_code = ''
-                if '----' in remark:
-                    parts = remark.split('----')
-                    if len(parts) >= 4:
-                        secret = parts[3].strip()
-                        if secret:
-                            try:
-                                totp = pyotp.TOTP(secret.replace(' ', ''))
-                                totp_code = totp.now()
-                            except:
-                                pass
+                # 获取状态
+                account = accounts.get(browser_id, {})
+                status_code = account.get('status', 'pending_check')
+                status_text = status_display.get(status_code, status_code)
                 
                 row = self.browser_table.rowCount()
                 self.browser_table.insertRow(row)
@@ -576,7 +617,7 @@ class MainWindow(QMainWindow):
                 self.browser_table.setItem(row, 1, QTableWidgetItem(str(seq)))
                 self.browser_table.setItem(row, 2, QTableWidgetItem(name))
                 self.browser_table.setItem(row, 3, QTableWidgetItem(browser_id))
-                self.browser_table.setItem(row, 4, QTableWidgetItem(totp_code))
+                self.browser_table.setItem(row, 4, QTableWidgetItem(status_text))
                 self.browser_table.setItem(row, 5, QTableWidgetItem(remark[:80] + '...' if len(remark) > 80 else remark))
             
             self.log(f"列表刷新完成，共 {len(browsers)} 个窗口")

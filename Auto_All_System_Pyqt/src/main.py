@@ -5,6 +5,8 @@
 """
 import sys
 import os
+import subprocess
+import threading
 
 # 确保src目录在路径中
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +25,82 @@ except ImportError:
     from database import DBManager
 
 DBManager.init_db()
+
+# 全局Web服务器进程
+_web_server_process = None
+
+
+def start_web_server(port=8080):
+    """
+    @brief 在后台线程启动Web服务器
+    @param port 服务器端口
+    @return 是否成功启动
+    """
+    global _web_server_process
+    
+    if _web_server_process and _web_server_process.poll() is None:
+        print("[Web服务器] 已在运行中")
+        return True
+    
+    try:
+        # 查找server.py路径
+        server_paths = [
+            os.path.join(SRC_DIR, 'web', 'server.py'),
+            os.path.join(SRC_DIR, 'web_admin', 'server.py'),
+            os.path.join(os.path.dirname(SRC_DIR), 'web', 'server.py'),
+        ]
+        
+        server_path = None
+        for path in server_paths:
+            if os.path.exists(path):
+                server_path = path
+                break
+        
+        if not server_path:
+            print("[Web服务器] 未找到server.py文件")
+            return False
+        
+        # 启动子进程
+        python_exe = sys.executable
+        _web_server_process = subprocess.Popen(
+            [python_exe, server_path, '--port', str(port)],
+            cwd=os.path.dirname(server_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        )
+        
+        print(f"[Web服务器] 已启动，端口: {port}, PID: {_web_server_process.pid}")
+        return True
+        
+    except Exception as e:
+        print(f"[Web服务器] 启动失败: {e}")
+        return False
+
+
+def stop_web_server():
+    """
+    @brief 停止Web服务器
+    """
+    global _web_server_process
+    
+    if _web_server_process:
+        try:
+            _web_server_process.terminate()
+            _web_server_process.wait(timeout=5)
+            print("[Web服务器] 已停止")
+        except:
+            _web_server_process.kill()
+        _web_server_process = None
+
+
+def is_web_server_running():
+    """
+    @brief 检查Web服务器是否在运行
+    @return 是否运行中
+    """
+    global _web_server_process
+    return _web_server_process and _web_server_process.poll() is None
 
 
 def run_gui():
@@ -84,4 +162,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 

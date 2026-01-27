@@ -56,7 +56,9 @@ class APIHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-type', 'application/json; charset=utf-8')
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
         self.end_headers()
         self.wfile.write(json.dumps(data, default=str, ensure_ascii=False).encode('utf-8'))
     
@@ -356,6 +358,40 @@ class APIHandler(http.server.SimpleHTTPRequestHandler):
                 'failed': errors,
                 'errors': details[:10]
             })
+            return
+
+        if path == '/api/cards/update':
+            card_id = params.get('id')
+            if card_id is None:
+                self.send_json({'success': False, 'error': '缺少卡片ID'}, 400)
+                return
+
+            try:
+                card_id = int(card_id)
+            except Exception:
+                self.send_json({'success': False, 'error': '卡片ID无效'}, 400)
+                return
+
+            try:
+                DBManager.update_card(
+                    card_id,
+                    exp_month=params.get('exp_month'),
+                    exp_year=params.get('exp_year'),
+                    cvv=params.get('cvv'),
+                    holder_name=params.get('holder_name'),
+                    zip_code=params.get('zip_code'),
+                    country=params.get('country'),
+                    state=params.get('state'),
+                    city=params.get('city'),
+                    address=params.get('address'),
+                    max_usage=params.get('max_usage'),
+                    is_active=params.get('is_active'),
+                )
+            except Exception as e:
+                self.send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            self.send_json({'success': True})
             return
         
         if path == '/api/cards/delete':

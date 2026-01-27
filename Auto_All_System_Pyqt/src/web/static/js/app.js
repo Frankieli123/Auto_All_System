@@ -44,7 +44,8 @@ const api = {
     },
     
     get(endpoint) {
-        return this.request(endpoint);
+        const joiner = endpoint.includes('?') ? '&' : '?';
+        return this.request(`${endpoint}${joiner}_ts=${Date.now()}`, { cache: 'no-store' });
     },
     
     post(endpoint, data) {
@@ -256,6 +257,9 @@ function renderAccountsTable() {
             </td>
             <td>${formatDate(acc.updated_at)}</td>
             <td>
+                <button class="btn btn-ghost btn-icon-only" onclick="editAccount('${acc.email}')" title="编辑">
+                    ✏️
+                </button>
                 <button class="btn btn-ghost btn-icon-only" onclick="deleteAccount('${acc.email}')" title="删除">
                     🗑️
                 </button>
@@ -362,6 +366,54 @@ async function deleteSelectedAccounts() {
         loadStats();
     } catch (error) {
         showToast(`删除失败: ${error.message}`, 'error');
+    }
+}
+
+function editAccount(email) {
+    const account = state.accounts.find(a => a.email === email);
+    if (!account) {
+        showToast('未找到账号', 'error');
+        return;
+    }
+    
+    document.getElementById('edit-account-email-original').value = email;
+    document.getElementById('edit-account-email').value = email;
+    document.getElementById('edit-account-password').value = account.password || '';
+    document.getElementById('edit-account-recovery').value = account.recovery_email || '';
+    document.getElementById('edit-account-secret').value = account.secret_key || '';
+    document.getElementById('edit-account-status').value = account.status || 'pending_check';
+    
+    showModal('edit-account');
+}
+
+async function saveEditAccount() {
+    const email = document.getElementById('edit-account-email-original').value;
+    const password = document.getElementById('edit-account-password').value;
+    const recovery_email = document.getElementById('edit-account-recovery').value;
+    const secret_key = document.getElementById('edit-account-secret').value;
+    const status = document.getElementById('edit-account-status').value;
+    
+    if (!email) {
+        showToast('邮箱不能为空', 'error');
+        return;
+    }
+    
+    try {
+        await api.post('/api/accounts/update', {
+            email: email,
+            updates: {
+                password: password,
+                recovery_email: recovery_email,
+                secret_key: secret_key,
+                status: status
+            }
+        });
+        showToast('保存成功', 'success');
+        closeModal();
+        await loadAccounts();
+        await loadStats();
+    } catch (error) {
+        showToast(`保存失败: ${error.message}`, 'error');
     }
 }
 
@@ -539,7 +591,7 @@ function renderCardsTable() {
     if (filtered.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="9" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                <td colspan="13" style="text-align: center; padding: 40px; color: var(--text-muted);">
                     暂无数据
                 </td>
             </tr>
@@ -576,6 +628,10 @@ function renderCardsTable() {
                 </td>
                 <td>${c.holder_name || '-'}</td>
                 <td>${c.zip_code || '-'}</td>
+                <td>${c.country || '-'}</td>
+                <td>${c.state || '-'}</td>
+                <td>${c.city || '-'}</td>
+                <td title="${c.address || ''}">${c.address || '-'}</td>
                 <td>${c.usage_count}/${c.max_usage}</td>
                 <td>
                     <span class="status-tag ${c.is_active ? (isExhausted ? 'inactive' : 'active') : 'inactive'}">
@@ -583,6 +639,9 @@ function renderCardsTable() {
                     </span>
                 </td>
                 <td>
+                    <button class="btn btn-ghost btn-icon-only" onclick="openEditCard(${c.id})" title="编辑">
+                        ✏️
+                    </button>
                     <button class="btn btn-ghost btn-icon-only" onclick="toggleCard(${c.id}, ${!c.is_active})" 
                             title="${c.is_active ? '禁用' : '启用'}">
                         ${c.is_active ? '🔒' : '🔓'}
@@ -621,8 +680,8 @@ async function importCards() {
         const result = await api.post('/api/cards/import', { text, max_usage: maxUsage });
         showToast(`成功导入 ${result.imported} 张卡片`, 'success');
         closeModal();
-        loadCards();
-        loadStats();
+        await loadCards();
+        await loadStats();
         document.getElementById('import-cards-text').value = '';
     } catch (error) {
         showToast(`导入失败: ${error.message}`, 'error');
@@ -633,7 +692,7 @@ async function toggleCard(id, active) {
     try {
         await api.post('/api/cards/toggle', { id, active });
         showToast(active ? '卡片已启用' : '卡片已禁用', 'success');
-        loadCards();
+        await loadCards();
     } catch (error) {
         showToast(`操作失败: ${error.message}`, 'error');
     }
@@ -645,8 +704,8 @@ async function deleteCard(id) {
     try {
         await api.post('/api/cards/delete', { ids: [id] });
         showToast('删除成功', 'success');
-        loadCards();
-        loadStats();
+        await loadCards();
+        await loadStats();
     } catch (error) {
         showToast(`删除失败: ${error.message}`, 'error');
     }
@@ -658,10 +717,63 @@ async function clearCards() {
     try {
         await api.post('/api/cards/clear', {});
         showToast('已清空所有卡片', 'success');
-        loadCards();
-        loadStats();
+        await loadCards();
+        await loadStats();
     } catch (error) {
         showToast(`清空失败: ${error.message}`, 'error');
+    }
+}
+
+function openEditCard(id) {
+    const card = state.cards.find(c => c.id === id);
+    if (!card) return;
+
+    document.getElementById('edit-card-id').value = card.id;
+    document.getElementById('edit-card-number').value = card.card_number || '';
+    document.getElementById('edit-card-month').value = parseInt(card.exp_month, 10) || '';
+    document.getElementById('edit-card-year').value = parseInt(card.exp_year, 10) || '';
+    document.getElementById('edit-card-cvv').value = card.cvv || '';
+    document.getElementById('edit-card-holder').value = card.holder_name || '';
+    document.getElementById('edit-card-zip').value = card.zip_code || '';
+    document.getElementById('edit-card-country').value = card.country || '';
+    document.getElementById('edit-card-state').value = card.state || '';
+    document.getElementById('edit-card-city').value = card.city || '';
+    document.getElementById('edit-card-address').value = card.address || '';
+    document.getElementById('edit-card-max-usage').value = parseInt(card.max_usage, 10) || 1;
+    document.getElementById('edit-card-active').value = (card.is_active ? 'true' : 'false');
+
+    showModal('edit-card');
+}
+
+async function saveEditCard() {
+    const payload = {
+        id: parseInt(document.getElementById('edit-card-id').value, 10),
+        exp_month: parseInt(document.getElementById('edit-card-month').value, 10),
+        exp_year: parseInt(document.getElementById('edit-card-year').value, 10),
+        cvv: document.getElementById('edit-card-cvv').value,
+        holder_name: document.getElementById('edit-card-holder').value,
+        zip_code: document.getElementById('edit-card-zip').value,
+        country: document.getElementById('edit-card-country').value,
+        state: document.getElementById('edit-card-state').value,
+        city: document.getElementById('edit-card-city').value,
+        address: document.getElementById('edit-card-address').value,
+        max_usage: parseInt(document.getElementById('edit-card-max-usage').value, 10) || 1,
+        is_active: document.getElementById('edit-card-active').value === 'true',
+    };
+
+    if (!payload.id) {
+        showToast('卡片ID无效', 'error');
+        return;
+    }
+
+    try {
+        await api.post('/api/cards/update', payload);
+        showToast('保存成功', 'success');
+        closeModal();
+        await loadCards();
+        await loadStats();
+    } catch (error) {
+        showToast(`保存失败: ${error.message}`, 'error');
     }
 }
 

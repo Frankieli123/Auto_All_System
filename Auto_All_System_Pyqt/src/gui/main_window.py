@@ -14,6 +14,11 @@ _src_dir = os.path.dirname(_current_dir)
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
+# 解决第三方 google 命名空间包占用导致导入 google.backend 失败
+_google_mod = sys.modules.get('google')
+if _google_mod is not None and getattr(_google_mod, '__file__', None) is None:
+    sys.modules.pop('google', None)
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QMessageBox, QGroupBox,
@@ -30,6 +35,15 @@ except ImportError:
     from base_window import resource_path, get_data_path
 
 
+class NumericTableWidgetItem(QTableWidgetItem):
+    """支持数值排序的表格项"""
+    def __lt__(self, other):
+        try:
+            return int(self.text()) < int(other.text())
+        except (ValueError, AttributeError):
+            return super().__lt__(other)
+
+
 class MainWindow(QMainWindow):
     """
     @brief 主窗口框架类
@@ -41,7 +55,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("比特浏览器窗口管理工具")
+        self.setWindowTitle(f"浏览器窗口管理工具 ({self._get_backend_display_name()})")
         self.resize(1300, 800)
         
         # 任务控制标志
@@ -59,6 +73,32 @@ class MainWindow(QMainWindow):
         
         # 加载初始数据
         QTimer.singleShot(100, self._on_startup)
+
+    def _get_backend_display_name(self) -> str:
+        try:
+            from core.backend_config import get_backend
+            return "GeekEZ" if get_backend() == "geekez" else "BitBrowser"
+        except Exception:
+            return "BitBrowser"
+
+    def _apply_backend_ui(self):
+        name = self._get_backend_display_name()
+        self.setWindowTitle(f"浏览器窗口管理工具 ({name})")
+        btn = getattr(self, "btn_backend_toggle", None)
+        if btn:
+            target = "BitBrowser" if name == "GeekEZ" else "GeekEZ"
+            btn.setText(f"🧩 {name} → 切换到 {target}")
+            btn.setMinimumWidth(220)
+            if name == "GeekEZ":
+                btn.setStyleSheet(
+                    "QPushButton { background-color: #009688; color: white; font-weight: bold; border-radius: 4px; padding: 6px 14px; }"
+                    "QPushButton:hover { background-color: #00796B; }"
+                )
+            else:
+                btn.setStyleSheet(
+                    "QPushButton { background-color: #3F51B5; color: white; font-weight: bold; border-radius: 4px; padding: 6px 14px; }"
+                    "QPushButton:hover { background-color: #303F9F; }"
+                )
     
     def _set_icon(self):
         """设置窗口图标"""
@@ -158,7 +198,61 @@ class MainWindow(QMainWindow):
         """)
         btn_sheerlink.clicked.connect(self._action_get_sheerlink)
         layout.addWidget(btn_sheerlink)
+
+        # 一键年龄验证
+        btn_age_verify = QPushButton("一键年龄验证")
+        btn_age_verify.setFixedHeight(40)
+        btn_age_verify.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_age_verify.setStyleSheet("""
+            QPushButton {
+                text-align: left;
+                padding-left: 15px;
+                font-weight: bold;
+                color: white;
+                background-color: #E91E63;
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #C2185B; }
+        """)
+        btn_age_verify.clicked.connect(self._action_age_verification)
+        layout.addWidget(btn_age_verify)
         
+        # 一键修改2FA
+        btn_reset_2fa = QPushButton("一键修改2FA")
+        btn_reset_2fa.setFixedHeight(40)
+        btn_reset_2fa.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_reset_2fa.setStyleSheet("""
+            QPushButton {
+                text-align: left;
+                padding-left: 15px;
+                font-weight: bold;
+                color: white;
+                background-color: #009688;
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #00796B; }
+        """)
+        btn_reset_2fa.clicked.connect(self._action_reset_2fa)
+        layout.addWidget(btn_reset_2fa)
+
+        # 一键修改辅助邮箱
+        btn_change_recovery = QPushButton("一键修改辅助邮箱")
+        btn_change_recovery.setFixedHeight(40)
+        btn_change_recovery.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_change_recovery.setStyleSheet("""
+            QPushButton {
+                text-align: left;
+                padding-left: 15px;
+                font-weight: bold;
+                color: white;
+                background-color: #FF5722;
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #E64A19; }
+        """)
+        btn_change_recovery.clicked.connect(self._action_change_recovery_email)
+        layout.addWidget(btn_change_recovery)
+
         # 批量验证SheerID
         btn_verify = QPushButton("批量验证 SheerID Link")
         btn_verify.setFixedHeight(40)
@@ -340,6 +434,14 @@ class MainWindow(QMainWindow):
         """)
         self.btn_web_server.clicked.connect(self._toggle_web_server)
         layout.addWidget(self.btn_web_server)
+
+        # 指纹浏览器切换按钮（放在 Web 服务器按钮旁边）
+        self.btn_backend_toggle = QPushButton()
+        self.btn_backend_toggle.setFixedHeight(30)
+        self.btn_backend_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_backend_toggle.clicked.connect(self._toggle_backend)
+        layout.addWidget(self.btn_backend_toggle)
+        self._apply_backend_ui()
         
         # 全局并发数
         layout.addWidget(QLabel("🔥 全局并发数:"))
@@ -352,6 +454,22 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.thread_spinbox)
         
         return layout
+
+    def _toggle_backend(self):
+        try:
+            from core.backend_config import get_backend, set_backend
+            current = get_backend()
+            target = "bitbrowser" if current == "geekez" else "geekez"
+            if not set_backend(target):
+                self.log("❌ 切换失败：写入配置失败")
+                return
+            os.environ["BROWSER_BACKEND"] = target
+            self._apply_backend_ui()
+            self.log(f"✅ 已切换指纹浏览器: {self._get_backend_display_name()}")
+            self._refresh_browser_list()
+            self._check_files()
+        except Exception as e:
+            self.log(f"❌ 切换指纹浏览器失败: {e}")
     
     def _toggle_web_server(self):
         """启动/停止Web服务器"""
@@ -490,12 +608,16 @@ class MainWindow(QMainWindow):
         
         # 浏览器表格
         self.browser_table = QTableWidget()
-        self.browser_table.setColumnCount(6)
-        self.browser_table.setHorizontalHeaderLabels(["选择", "序号", "名称", "窗口ID", "状态", "备注"])
+        self.browser_table.setColumnCount(7)
+        self.browser_table.setHorizontalHeaderLabels(["选择", "序号", "名称", "窗口ID", "状态", "操作记录", "备注"])
+        
+        # 启用表头排序
+        self.browser_table.setSortingEnabled(True)
         
         # 设置列宽可拖动（Interactive模式）
         header = self.browser_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSortIndicatorShown(True)
         
         # 设置初始列宽
         self.browser_table.setColumnWidth(0, 40)   # 选择
@@ -503,15 +625,17 @@ class MainWindow(QMainWindow):
         self.browser_table.setColumnWidth(2, 120)  # 名称
         self.browser_table.setColumnWidth(3, 280)  # 窗口ID
         self.browser_table.setColumnWidth(4, 100)  # 状态
-        self.browser_table.setColumnWidth(5, 200)  # 备注
+        self.browser_table.setColumnWidth(5, 100)  # 操作记录
+        self.browser_table.setColumnWidth(6, 200)  # 备注
         
         # 最后一列自动拉伸填充剩余空间
         header.setStretchLastSection(True)
         
         self.browser_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.browser_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)  # 禁用选中效果
-        self.browser_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 禁用焦点框
+        self.browser_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # 支持拖动多选
+        self.browser_table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # 允许键盘焦点
         self.browser_table.setAlternatingRowColors(True)  # 隔行变色
+        
         layout.addWidget(self.browser_table)
         
         group.setLayout(layout)
@@ -549,6 +673,7 @@ class MainWindow(QMainWindow):
     
     def _on_startup(self):
         """启动时执行"""
+        self._apply_backend_ui()
         self._refresh_browser_list()
         self._check_files()
     
@@ -582,6 +707,8 @@ class MainWindow(QMainWindow):
             # 获取所有账号状态
             accounts = {acc['browser_id']: acc for acc in DBManager.get_all_accounts() if acc.get('browser_id')}
             
+            # 暂时禁用排序以提升性能
+            self.browser_table.setSortingEnabled(False)
             self.browser_table.setRowCount(0)
             
             # 状态显示映射
@@ -607,6 +734,19 @@ class MainWindow(QMainWindow):
                 status_code = account.get('status', 'pending_check')
                 status_text = status_display.get(status_code, status_code)
                 
+                # 获取操作记录
+                ops_parts = []
+                secret_updated = account.get('secret_updated_at', '')
+                recovery_updated = account.get('recovery_updated_at', '')
+                if secret_updated:
+                    # 只显示日期部分 MM-DD
+                    date_part = secret_updated[5:10] if len(secret_updated) >= 10 else secret_updated
+                    ops_parts.append(f"🔑{date_part}")
+                if recovery_updated:
+                    date_part = recovery_updated[5:10] if len(recovery_updated) >= 10 else recovery_updated
+                    ops_parts.append(f"✉️{date_part}")
+                ops_text = " ".join(ops_parts) if ops_parts else ""
+                
                 row = self.browser_table.rowCount()
                 self.browser_table.insertRow(row)
                 
@@ -616,12 +756,18 @@ class MainWindow(QMainWindow):
                 chk_item.setCheckState(Qt.CheckState.Unchecked)
                 self.browser_table.setItem(row, 0, chk_item)
                 
-                self.browser_table.setItem(row, 1, QTableWidgetItem(str(seq)))
+                # 序号列 - 使用NumericTableWidgetItem支持数值排序
+                seq_item = NumericTableWidgetItem(str(seq))
+                self.browser_table.setItem(row, 1, seq_item)
+                
                 self.browser_table.setItem(row, 2, QTableWidgetItem(name))
                 self.browser_table.setItem(row, 3, QTableWidgetItem(browser_id))
                 self.browser_table.setItem(row, 4, QTableWidgetItem(status_text))
-                self.browser_table.setItem(row, 5, QTableWidgetItem(remark[:80] + '...' if len(remark) > 80 else remark))
+                self.browser_table.setItem(row, 5, QTableWidgetItem(ops_text))
+                self.browser_table.setItem(row, 6, QTableWidgetItem(remark[:80] + '...' if len(remark) > 80 else remark))
             
+            # 重新启用排序
+            self.browser_table.setSortingEnabled(True)
             self.log(f"列表刷新完成，共 {len(browsers)} 个窗口")
             
         except Exception as e:
@@ -644,24 +790,28 @@ class MainWindow(QMainWindow):
             for browser in browsers:
                 name = browser.get('name', '')
                 remark = browser.get('remark', '')
-                
-                if '----' in remark:
-                    parts = remark.split('----')
-                    email = parts[0] if len(parts) > 0 else ''
-                    secret = parts[3].strip() if len(parts) >= 4 else ''
-                    
-                    if secret:
-                        try:
-                            totp = pyotp.TOTP(secret.replace(' ', ''))
-                            code = totp.now()
-                            twofa_data.append({
-                                'name': name,
-                                'email': email,
-                                'secret': secret,
-                                'code': code
-                            })
-                        except:
-                            pass
+
+                try:
+                    from core.database import parse_account_string
+                    acc = parse_account_string(remark, '----') or {}
+                    email = acc.get('email') or ''
+                    secret = (acc.get('secret_key') or '').strip()
+                except Exception:
+                    email = ''
+                    secret = ''
+
+                if secret:
+                    try:
+                        totp = pyotp.TOTP(secret.replace(' ', ''))
+                        code = totp.now()
+                        twofa_data.append({
+                            'name': name,
+                            'email': email,
+                            'secret': secret,
+                            'code': code
+                        })
+                    except Exception:
+                        pass
             
             if not twofa_data:
                 self.log("没有找到2FA验证码数据")
@@ -704,6 +854,22 @@ class MainWindow(QMainWindow):
             item = self.browser_table.item(row, 0)
             if item:
                 item.setCheckState(Qt.CheckState.Checked if is_checked else Qt.CheckState.Unchecked)
+    
+    def keyPressEvent(self, event):
+        """键盘事件 - 空格键切换所有选中行的复选框"""
+        if event.key() == Qt.Key.Key_Space:
+            selected_rows = set()
+            for item in self.browser_table.selectedItems():
+                selected_rows.add(item.row())
+            
+            if selected_rows:
+                for row in selected_rows:
+                    chk_item = self.browser_table.item(row, 0)
+                    if chk_item:
+                        new_state = Qt.CheckState.Unchecked if chk_item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked
+                        chk_item.setCheckState(new_state)
+                return
+        super().keyPressEvent(event)
     
     def _open_selected_browsers(self):
         """打开选中的浏览器"""
@@ -806,8 +972,33 @@ class MainWindow(QMainWindow):
             
             # 获取可用代理
             proxies_db = DBManager.get_available_proxies()
+            if not proxies_db:
+                all_proxies = DBManager.get_all_proxies()
+                if all_proxies:
+                    msg = (
+                        f"当前没有可用代理（0/{len(all_proxies)}，全部已标记为已使用）。\n\n"
+                        "是：复用这些代理继续创建\n"
+                        "否：继续创建但不使用代理\n"
+                        "取消：取消本次创建"
+                    )
+                    reply = QMessageBox.question(
+                        self,
+                        "提示",
+                        msg,
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                        QMessageBox.StandardButton.Yes,
+                    )
+                    if reply == QMessageBox.StandardButton.Yes:
+                        proxies_db = all_proxies
+                        self.log(f"⚠️ 可用代理为空，已选择复用全部代理 {len(all_proxies)} 个")
+                    elif reply == QMessageBox.StandardButton.No:
+                        self.log("⚠️ 可用代理为空，已选择继续创建（不使用代理）")
+                    else:
+                        self.log("已取消创建任务")
+                        return
             proxies = [
                 {
+                    'id': p.get('id'),  # 保留代理ID用于标记使用者
                     'type': p.get('proxy_type', 'socks5'),
                     'host': p.get('host', ''),
                     'port': str(p.get('port', '')),
@@ -946,6 +1137,213 @@ class MainWindow(QMainWindow):
         self._worker = WorkerThread('sheerlink', ids=selected_ids, thread_count=thread_count)
         self._worker.log_signal.connect(self.log)
         self._worker.finished_signal.connect(self._on_sheerlink_finished)
+        self._worker.start()
+
+    def _action_age_verification(self):
+        """一键年龄验证"""
+        selected_ids = self._get_selected_browser_ids()
+        if not selected_ids:
+            QMessageBox.warning(self, "提示", "请先在列表中勾选要处理的窗口")
+            return
+
+        thread_count = self.thread_spinbox.value()
+
+        msg = f"确定要对选中的 {len(selected_ids)} 个窗口执行年龄验证吗？\n"
+        msg += f"当前并发模式: {thread_count} 线程\n"
+        msg += "将优先使用数据库中的可用卡片进行验证。"
+
+        reply = QMessageBox.question(
+            self, "确认操作", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.log(f"\n开始年龄验证，共 {len(selected_ids)} 个窗口，并发: {thread_count}...")
+
+        self._stop_flag = False
+        self.btn_stop.setEnabled(True)
+
+        from gui.worker_thread import WorkerThread
+        self._worker = WorkerThread("age_verification", ids=selected_ids, thread_count=thread_count)
+        self._worker.log_signal.connect(self.log)
+        self._worker.finished_signal.connect(self._on_task_finished)
+        self._worker.start()
+
+    def _action_reset_2fa(self):
+        """一键修改2FA"""
+        selected_ids = self._get_selected_browser_ids()
+        if not selected_ids:
+            QMessageBox.warning(self, "提示", "请先在列表中勾选要处理的窗口")
+            return
+
+        thread_count = self.thread_spinbox.value()
+
+        msg = f"确定要对选中的 {len(selected_ids)} 个窗口执行修改2FA吗？\n"
+        msg += f"当前并发模式: {thread_count} 线程\n"
+        msg += "⚠️ 将在Google账号中添加新的 Authenticator 并更新本地2FA密钥。"
+
+        reply = QMessageBox.question(
+            self, "确认操作", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.log(f"\n开始修改2FA，共 {len(selected_ids)} 个窗口，并发: {thread_count}...")
+
+        self._stop_flag = False
+        self.btn_stop.setEnabled(True)
+
+        from gui.worker_thread import WorkerThread
+        self._worker = WorkerThread("reset_2fa", ids=selected_ids, thread_count=thread_count)
+        self._worker.log_signal.connect(self.log)
+        self._worker.finished_signal.connect(self._on_task_finished)
+        self._worker.start()
+
+    def _action_change_recovery_email(self):
+        """一键修改辅助邮箱"""
+        selected_ids = self._get_selected_browser_ids()
+        if not selected_ids:
+            QMessageBox.warning(self, "提示", "请先在列表中勾选要处理的窗口")
+            return
+
+        thread_count = self.thread_spinbox.value()
+
+        # 显示选项对话框
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QRadioButton, QLineEdit, QLabel, QPushButton, QGroupBox, QFormLayout
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("修改辅助邮箱 - 选择验证码接收方式")
+        dialog.setMinimumWidth(450)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 说明
+        info_label = QLabel(f"将对选中的 {len(selected_ids)} 个窗口修改辅助邮箱。\n请选择验证码的接收方式：")
+        layout.addWidget(info_label)
+        
+        # 选项组
+        group = QGroupBox("验证码接收方式")
+        group_layout = QVBoxLayout(group)
+        
+        # 临时邮箱选项
+        radio_temp = QRadioButton("使用临时邮箱（api.318062.xyz）- 不稳定")
+        radio_temp.setChecked(False)
+        group_layout.addWidget(radio_temp)
+        
+        # QQ邮箱选项（推荐）
+        radio_qq = QRadioButton("使用自定义域名 + QQ邮箱（推荐，稳定）")
+        radio_qq.setChecked(True)
+        group_layout.addWidget(radio_qq)
+        
+        # 说明
+        desc_label = QLabel("将生成随机的 xxx@1238988.xyz 邮箱，验证码自动转发到你的QQ邮箱")
+        desc_label.setStyleSheet("color: gray; font-size: 11px; margin-left: 20px;")
+        group_layout.addWidget(desc_label)
+        
+        # QQ邮箱配置
+        qq_config = QGroupBox("QQ邮箱配置（用于读取转发的验证码）")
+        qq_form = QFormLayout(qq_config)
+        
+        qq_email_input = QLineEdit()
+        qq_email_input.setPlaceholderText("例如: 123456789@qq.com")
+        qq_form.addRow("QQ邮箱地址:", qq_email_input)
+        
+        qq_auth_input = QLineEdit()
+        qq_auth_input.setPlaceholderText("在QQ邮箱设置中获取授权码")
+        qq_auth_input.setEchoMode(QLineEdit.EchoMode.Password)
+        qq_form.addRow("授权码:", qq_auth_input)
+        
+        help_label = QLabel('<a href="https://service.mail.qq.com/detail/0/75">如何获取授权码?</a>')
+        help_label.setOpenExternalLinks(True)
+        qq_form.addRow("", help_label)
+        
+        qq_config.setEnabled(True)  # 默认启用，因为QQ邮箱选项默认选中
+        group_layout.addWidget(qq_config)
+        
+        layout.addWidget(group)
+        
+        # 切换QQ邮箱配置可用性
+        def on_radio_changed():
+            qq_config.setEnabled(radio_qq.isChecked())
+        radio_qq.toggled.connect(on_radio_changed)
+        radio_temp.toggled.connect(on_radio_changed)
+        
+        # 加载已保存的QQ邮箱配置，或使用默认值
+        try:
+            from google.backend.qq_email import load_qq_email_config, DEFAULT_QQ_AUTH_CODE, DEFAULT_QQ_EMAIL
+            saved_qq, saved_auth = load_qq_email_config()
+            # QQ邮箱优先用保存的，否则用默认值
+            if saved_qq:
+                qq_email_input.setText(saved_qq)
+            elif DEFAULT_QQ_EMAIL:
+                qq_email_input.setText(DEFAULT_QQ_EMAIL)
+            # 授权码优先用保存的，否则用默认值
+            if saved_auth:
+                qq_auth_input.setText(saved_auth)
+            elif DEFAULT_QQ_AUTH_CODE:
+                qq_auth_input.setText(DEFAULT_QQ_AUTH_CODE)
+        except:
+            pass
+        
+        # 按钮
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton("确定")
+        btn_cancel = QPushButton("取消")
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+        
+        btn_ok.clicked.connect(dialog.accept)
+        btn_cancel.clicked.connect(dialog.reject)
+        
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        
+        use_qq_email = radio_qq.isChecked()
+        qq_email = qq_email_input.text().strip()
+        qq_auth_code = qq_auth_input.text().strip()
+        
+        # 如果选择QQ邮箱，验证配置
+        if use_qq_email:
+            if not qq_email or not qq_auth_code:
+                QMessageBox.warning(self, "提示", "请填写QQ邮箱地址和授权码")
+                return
+            
+            # 保存配置
+            try:
+                from google.backend.qq_email import save_qq_email_config, test_qq_email_connection
+                save_qq_email_config(qq_email, qq_auth_code)
+                
+                # 测试连接
+                self.log("测试QQ邮箱连接...")
+                success, msg = test_qq_email_connection(qq_email, qq_auth_code)
+                if not success:
+                    QMessageBox.warning(self, "连接失败", f"QQ邮箱连接测试失败:\n{msg}\n\n请检查邮箱地址和授权码是否正确。")
+                    return
+                self.log("✅ QQ邮箱连接成功")
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"配置保存失败: {e}")
+                return
+
+        self.log(f"\n开始修改辅助邮箱，共 {len(selected_ids)} 个窗口，并发: {thread_count}...")
+
+        self._stop_flag = False
+        self.btn_stop.setEnabled(True)
+
+        from gui.worker_thread import WorkerThread
+        self._worker = WorkerThread(
+            "change_recovery_email",
+            ids=selected_ids,
+            thread_count=thread_count,
+            use_qq_email=use_qq_email,
+            qq_email=qq_email,
+            qq_auth_code=qq_auth_code
+        )
+        self._worker.log_signal.connect(self.log)
+        self._worker.finished_signal.connect(self._on_task_finished)
         self._worker.start()
     
     def _on_sheerlink_finished(self, result: dict):
@@ -1107,7 +1505,10 @@ class MainWindow(QMainWindow):
                 'sheerlink': 'SheerLink提取',
                 'verify_sheerid': 'SheerID验证',
                 'bind_card': '绑卡订阅',
-                'all_in_one': '全自动处理'
+                'all_in_one': '全自动处理',
+                'age_verification': '年龄验证',
+                'reset_2fa': '修改2FA',
+                'change_recovery_email': '修改辅助邮箱'
             }
             name = task_names.get(task_type, task_type)
             self.log(f"\n✅ {name}完成，成功 {count} 个")

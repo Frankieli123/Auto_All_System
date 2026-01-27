@@ -7,10 +7,12 @@
 """
 
 import asyncio
+import time
 import re
 import pyotp
 from typing import Tuple, Optional, Dict, Any
 from playwright.async_api import Page, expect
+from .google_recovery import handle_recovery_email_challenge, detect_manual_verification
 
 # ==================== 登录状态枚举 ====================
 class GoogleLoginStatus:
@@ -40,7 +42,21 @@ async def check_google_login_by_avatar(page: Page, timeout: float = 10.0) -> boo
         # 如果页面是空白或 about:blank，导航到 accounts.google.com
         if 'about:blank' in page.url:
             await page.goto("https://accounts.google.com/", wait_until="domcontentloaded")
-            
+
+        # 登录页有输入框 => 未登录（对齐 bitbrowser-automation 判定逻辑）
+        try:
+            email_box = page.locator('input[type="email"]').first
+            if await email_box.count() > 0 and await email_box.is_visible():
+                return False
+        except Exception:
+            pass
+        try:
+            pwd_box = page.locator('input[type="password"]').first
+            if await pwd_box.count() > 0 and await pwd_box.is_visible():
+                return False
+        except Exception:
+            pass
+
         # 头像按钮选择器 (多个备选)
         avatar_selectors = [
             'a[aria-label*="Google Account"] img.gbii',
@@ -206,11 +222,18 @@ async def _detect_page_elements(page: Page) -> Tuple[str, Optional[str]]:
         ]
         for selector in offer_selectors:
              if await page.locator(selector).count() > 0:
-                 return 'verified', None
+                  return 'verified', None
 
         # 5. 再次检查已订阅文本（防止API漏掉）
         if await page.locator('text="Subscribed"').count() > 0 or await page.locator('text="已订阅"').count() > 0:
              return 'subscribed', None
+
+        # 6. 已订阅页面文案（参考 bit 项目：You're already subscribed / Manage plan）
+        try:
+            if await page.locator('text=/already\\s+subscribed/i').count() > 0:
+                return 'subscribed', None
+        except Exception:
+            pass
 
         return 'ineligible', None
         
@@ -259,104 +282,302 @@ async def is_logged_in(page: Page) -> bool:
     """检查是否已登录"""
     return await check_google_login_by_avatar(page)
 
+async def _dismiss_post_login_prompts(page: Page) -> bool:
+    """处理登录后可能出现的安全/Passkeys 提示（Not now/Cancel/No thanks 等）"""
+    # 复用 bitbrowser-automation 的“多语言 Skip/Not now”思路：
+    # - 先用多选择器快速点击
+    # - 再用 get_by_role + regex 兜底
+    selectors = [
+        'button:has-text("Not now")',
+        '[role="button"]:has-text("Not now")',
+        'button:has-text("No thanks")',
+        '[role="button"]:has-text("No thanks")',
+        'button:has-text("Cancel")',
+        '[role="button"]:has-text("Cancel")',
+        'button:has-text("Later")',
+        '[role="button"]:has-text("Later")',
+        'button:has-text("Skip")',
+        '[role="button"]:has-text("Skip")',
+        'button:has-text("Omitir")',
+        '[role="button"]:has-text("Omitir")',
+        'button:has-text("Overslaan")',
+        '[role="button"]:has-text("Overslaan")',
+        'button:has-text("暂不")',
+        '[role="button"]:has-text("暂不")',
+        'button:has-text("取消")',
+        '[role="button"]:has-text("取消")',
+        'button:has-text("稍后")',
+        '[role="button"]:has-text("稍后")',
+        'button:has-text("跳过")',
+        '[role="button"]:has-text("跳过")',
+    ]
+
+    for selector in selectors:
+        try:
+            btn = await page.query_selector(selector)
+            if btn and await btn.is_visible():
+                await btn.click(force=True)
+                await asyncio.sleep(1)
+                return True
+        except Exception:
+            continue
+
+    try:
+        pattern = re.compile(r"Skip|Omitir|Overslaan|Not now|Later|No thanks|Cancel|暂不|取消|稍后|跳过", re.I)
+        btn = page.get_by_role("button", name=pattern).first
+        if await btn.count() > 0 and await btn.is_visible():
+            await btn.click(force=True)
+            await asyncio.sleep(1)
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+async def _confirm_logged_in(page: Page, timeout: float = 10.0) -> bool:
+    """通过跳转到 myaccount 再检测头像，确认是否真正完成登录"""
+    try:
+        await page.goto("https://myaccount.google.com/", wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+    try:
+        if await check_google_login_by_avatar(page, timeout=timeout):
+            return True
+    except Exception:
+        pass
+    try:
+        url = (page.url or "").lower()
+        if "myaccount.google.com" in url and "accounts.google.com" not in url:
+            email_box = page.locator('input[type="email"]').first
+            pwd_box = page.locator('input[type="password"]').first
+            if await email_box.count() == 0 and await pwd_box.count() == 0:
+                return True
+    except Exception:
+        pass
+    return False
+
 
 async def ensure_google_login(page: Page, account_info: dict) -> Tuple[bool, str]:
-    """确保Google已登录"""
-    email = account_info.get('email', '')
-    
-    # 1. 检查当前状态
-    is_logged = await check_google_login_by_avatar(page)
-    if is_logged:
-        # 可选：检查是否是正确账号
-        current_email = await _extract_logged_in_email(page)
-        if current_email and email and current_email.lower() != email.lower():
-            print(f"[GoogleAuth] 账号不匹配: 当前 {current_email}, 目标 {email}")
-            # 这里如果不匹配，可能需要退出登录? 或者直接报错
-            # 为简单起见，暂不强制退出，仅提示
+    """
+    确保 Google 已登录（复用 bitbrowser-automation 的判定方式）：
+    - 若能看到邮箱输入框 => 需要登录
+    - 看不到邮箱输入框 => 视为已登录（继续后续流程）
+    """
+    async def _has_login_inputs() -> bool:
+        try:
+            email_box = page.locator('input[type="email"]').first
+            if await email_box.count() > 0 and await email_box.is_visible():
+                return True
+        except Exception:
+            pass
+        try:
+            pwd_box = page.locator('input[type="password"]').first
+            if await pwd_box.count() > 0 and await pwd_box.is_visible():
+                return True
+        except Exception:
+            pass
+        return False
+
+    # 先处理可能的登录后提示（否则可能遮挡头像导致误判）
+    try:
+        for _ in range(3):
+            if not await _dismiss_post_login_prompts(page):
+                break
+    except Exception:
+        pass
+
+    # 当前页已登录：快速返回（不强制跳转到 accounts.google.com 触发重登）
+    try:
+        if await check_google_login_by_avatar(page, timeout=6):
+            return True, "已登录"
+    except Exception:
+        pass
+    try:
+        url = (page.url or "").lower()
+        if "myaccount.google.com" in url and "accounts.google.com" not in url and not await _has_login_inputs():
+            return True, "已登录"
+    except Exception:
+        pass
+
+    # 通过跳转 myaccount 判断是否被重定向到登录页
+    try:
+        await page.goto("https://myaccount.google.com/", wait_until="domcontentloaded", timeout=60000)
+    except Exception:
+        pass
+    try:
+        for _ in range(3):
+            if not await _dismiss_post_login_prompts(page):
+                break
+    except Exception:
+        pass
+    try:
+        url = (page.url or "").lower()
+        if "accounts.google.com" not in url and "myaccount.google.com" in url and not await _has_login_inputs():
+            return True, "已登录"
+    except Exception:
+        pass
+
+    # 未登录：进入登录页并执行登录
+    try:
+        if "accounts.google.com" not in (page.url or "").lower():
+            await page.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=60000)
+    except Exception:
+        pass
+    try:
+        ok, msg = await google_login(page, account_info)
+        if ok:
+            return True, msg
+    except Exception:
+        pass
+
+    if await _confirm_logged_in(page, timeout=8):
         return True, "已登录"
 
-    # 2. 未登录，执行登录
-    return await google_login(page, account_info)
+    return False, "未检测到已登录且无法进入登录页"
 
 
 async def google_login(page: Page, account_info: dict) -> Tuple[bool, str]:
-    """执行登录流程"""
-    email = account_info.get('email', '')
-    password = account_info.get('password', '')
-    
-    print(f"[GoogleAuth] 开始登录: {email}")
-    
+    """执行登录流程（复用 bitbrowser-automation 的流程与选择器）"""
+    email = (account_info.get("email") or "").strip()
+    password = account_info.get("password") or ""
+    secret = (account_info.get("secret") or account_info.get("2fa_secret") or account_info.get("secret_key") or "").replace(" ", "").strip()
+    backup = (account_info.get("backup") or account_info.get("backup_email") or account_info.get("recovery_email") or "").strip()
+
     try:
-        # 1. 导航
-        if "accounts.google.com" not in page.url:
-            await page.goto('https://accounts.google.com/signin', wait_until='domcontentloaded')
-        
-        # 2. 邮箱
-        try:
-            await page.locator('input[type="email"]').fill(email)
-            await page.click('#identifierNext >> button')
-        except Exception as e:
-            # 可能已经在密码页，或者其他情况
-            pass
-            
-        # 3. 密码
-        try:
-            # 等待密码框出现
-            await expect(page.locator('input[type="password"]')).to_be_visible(timeout=10000)
-            await page.locator('input[type="password"]').fill(password)
-            await page.click('#passwordNext >> button')
-        except Exception as e:
-            # 检查是否有错误提示
-            if await page.locator('text="Couldn\'t find your Google Account"').count() > 0:
-                return False, "账号不存在"
-            # 可能是直接进入了2FA或者无需密码? 
-            pass
+        async def _after_password_submitted() -> Tuple[bool, str]:
+            try:
+                totp_input = await page.wait_for_selector(
+                    'input[name="totpPin"], input[id="totpPin"], input[type="tel"]',
+                    timeout=10000,
+                )
+                if totp_input:
+                    if secret:
+                        code = pyotp.TOTP(secret).now()
+                        await totp_input.fill(code)
+                        await page.click("#totpNext >> button")
+                    else:
+                        handled = await handle_recovery_email_challenge(page, backup)
+                        if not handled:
+                            return False, "需要2FA或辅助邮箱验证，但未提供secret"
+            except Exception:
+                pass
 
-        # 4. 辅助验证 (2FA / Recovery)
-        # 循环检测接下来几步
-        for _ in range(5):
-            await page.wait_for_load_state("networkidle", timeout=2000)
-            
-            # 检测是否登录成功
-            if await check_google_login_by_avatar(page, timeout=3):
+            try:
+                await handle_recovery_email_challenge(page, backup)
+                if await detect_manual_verification(page):
+                    return False, "需要人工完成验证码"
+            except Exception:
+                pass
+
+            await asyncio.sleep(2)
+            try:
+                for _ in range(5):
+                    dismissed = await _dismiss_post_login_prompts(page)
+                    if dismissed:
+                        try:
+                            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                        except Exception:
+                            pass
+                    if await check_google_login_by_avatar(page, timeout=6):
+                        return True, "登录成功"
+                    await asyncio.sleep(1)
+            except Exception:
+                pass
+
+            if await _confirm_logged_in(page, timeout=10):
                 return True, "登录成功"
-            
-            # 检测2FA
-            if await page.locator('input[id="totpPin"]').count() > 0:
-                secret = account_info.get('secret') or account_info.get('2fa_secret')
-                if secret:
-                    try:
-                        code = pyotp.TOTP(secret.replace(" ", "")).now()
-                        await page.locator('input[id="totpPin"]').fill(code)
-                        await page.click('#totpNext >> button')
-                        continue
-                    except:
-                        return False, "2FA密钥无效"
-                else:
-                    return False, "缺少2FA密钥"
-            
-            # 检测辅助邮箱
-            if await page.locator('div:has-text("Confirm your recovery email")').count() > 0 or \
-               await page.locator('input[InputType="email"]').count() > 0: # 简化判断，实际需更精确
-               # Playwright locator logic for recovery email to be added if specific selector known
-               pass
-            
-            # 处理 "Not now" 弹窗
-            if await page.locator('button:has-text("Not now")').count() > 0:
-                await page.click('button:has-text("Not now")')
-                
-            await asyncio.sleep(1)
+            return False, "登录后未确认成功"
 
-        # 最终检查
-        if await check_google_login_by_avatar(page):
-            return True, "登录成功"
-            
-        return False, "登录超时或失败"
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return False, f"登录异常: {e}"
+        # 尽量进入统一入口页面
+        try:
+            if "accounts.google.com" not in page.url:
+                await page.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            pass
+
+        # 先处理可能的登录后提示；若已登录直接返回
+        try:
+            for _ in range(3):
+                if not await _dismiss_post_login_prompts(page):
+                    break
+        except Exception:
+            pass
+
+        if await check_google_login_by_avatar(page, timeout=6):
+            return True, "已登录"
+
+        if not email or not password:
+            return False, "需要登录但未提供账号信息"
+
+        # 兼容“验证身份/confirmidentifier”页：先点击下一步进入密码页
+        try:
+            if "confirmidentifier" in (page.url or "").lower():
+                next_loc = page.locator(
+                    '#identifierNext >> button, button:has-text("Next"), button:has-text("下一步"), '
+                    '[role="button"]:has-text("Next"), [role="button"]:has-text("下一步"), button[type="submit"]'
+                ).first
+                if await next_loc.count() > 0 and await next_loc.is_visible():
+                    await next_loc.click(force=True)
+                    await asyncio.sleep(2)
+        except Exception:
+            pass
+
+        # 若直接出现密码输入框（重登/确认身份流程），无需填邮箱
+        try:
+            pwd_loc = page.locator('input[type="password"]').first
+            if await pwd_loc.count() > 0 and await pwd_loc.is_visible():
+                await pwd_loc.fill(password)
+                try:
+                    btn = page.locator('#passwordNext >> button, button[type="submit"]').first
+                    if await btn.count() > 0 and await btn.is_visible():
+                        await btn.click()
+                    else:
+                        await pwd_loc.press("Enter")
+                except Exception:
+                    try:
+                        await pwd_loc.press("Enter")
+                    except Exception:
+                        pass
+                return await _after_password_submitted()
+        except Exception:
+            pass
+
+        # 常规登录：邮箱 + 密码
+        email_input = await page.wait_for_selector('input[type="email"]', timeout=5000)
+        if email_input:
+            await email_input.fill(email)
+            await page.click("#identifierNext >> button")
+
+            await page.wait_for_selector('input[type="password"]', state="visible", timeout=15000)
+            await page.fill('input[type="password"]', password)
+            await page.click("#passwordNext >> button")
+            return await _after_password_submitted()
+
+    except Exception:
+        # 不要盲目返回“已登录”：先尝试处理提示并确认
+        try:
+            for _ in range(3):
+                if not await _dismiss_post_login_prompts(page):
+                    break
+        except Exception:
+            pass
+        if await _confirm_logged_in(page, timeout=8):
+            return True, "已登录"
+        return False, "登录流程异常"
+
+    # 未看到邮箱输入框：要么已登录，要么卡在挑战/提示页
+    try:
+        for _ in range(3):
+            if not await _dismiss_post_login_prompts(page):
+                break
+    except Exception:
+        pass
+
+    if await _confirm_logged_in(page, timeout=8):
+        return True, "已登录"
+
+    return False, "未找到登录入口或需要人工处理"
 
 # ==================== 综合检测流程 ====================
 

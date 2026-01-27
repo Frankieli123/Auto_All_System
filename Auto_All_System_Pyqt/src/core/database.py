@@ -30,6 +30,42 @@ os.makedirs(BASE_DIR, exist_ok=True)
 lock = threading.Lock()
 
 
+def get_local_timestamp() -> str:
+    """返回本地时间字符串，格式：YYYY-MM-DD HH:MM:SS"""
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def parse_account_string(line: str, separator: str = '----'):
+    """
+    @brief 解析账号/备注字符串（公开辅助函数）
+    @param line 输入文本
+    @param separator 分隔符
+    @return 解析后的账号字典，失败返回None
+    """
+    try:
+        return DBManager._parse_account_line(line, separator)
+    except Exception:
+        return None
+
+
+def build_account_info_from_remark(remark: str) -> dict:
+    """
+    @brief 从浏览器 remark 构造 account_info（供自动化流程使用）
+    @return {'email','password','backup','backup_email','secret','2fa_secret'}
+    """
+    parsed = parse_account_string(remark or "", '----') or {}
+    recovery = parsed.get('recovery_email') or ''
+    secret = parsed.get('secret_key') or ''
+    return {
+        'email': (parsed.get('email') or '').strip(),
+        'password': parsed.get('password') or '',
+        'backup': recovery,
+        'backup_email': recovery,
+        'secret': secret,
+        '2fa_secret': secret,
+    }
+
+
 class DBManager:
     """
     @class DBManager
@@ -79,6 +115,10 @@ class DBManager:
                 cursor.execute('ALTER TABLE accounts ADD COLUMN browser_id TEXT')
             if 'created_at' not in columns:
                 cursor.execute('ALTER TABLE accounts ADD COLUMN created_at TIMESTAMP')
+            if 'secret_updated_at' not in columns:
+                cursor.execute('ALTER TABLE accounts ADD COLUMN secret_updated_at TEXT')
+            if 'recovery_updated_at' not in columns:
+                cursor.execute('ALTER TABLE accounts ADD COLUMN recovery_updated_at TEXT')
             
             # ==================== 代理表 ====================
             cursor.execute('''
@@ -107,6 +147,10 @@ class DBManager:
                     cvv TEXT NOT NULL,
                     holder_name TEXT,
                     zip_code TEXT,
+                    country TEXT,
+                    state TEXT,
+                    city TEXT,
+                    address TEXT,
                     billing_address TEXT,
                     remark TEXT,
                     usage_count INTEGER DEFAULT 0,
@@ -122,6 +166,14 @@ class DBManager:
             card_columns = [col[1] for col in cursor.fetchall()]
             if 'zip_code' not in card_columns:
                 cursor.execute('ALTER TABLE cards ADD COLUMN zip_code TEXT')
+            if 'country' not in card_columns:
+                cursor.execute('ALTER TABLE cards ADD COLUMN country TEXT')
+            if 'state' not in card_columns:
+                cursor.execute('ALTER TABLE cards ADD COLUMN state TEXT')
+            if 'city' not in card_columns:
+                cursor.execute('ALTER TABLE cards ADD COLUMN city TEXT')
+            if 'address' not in card_columns:
+                cursor.execute('ALTER TABLE cards ADD COLUMN address TEXT')
             
             # ==================== 系统设置表 ====================
             cursor.execute('''
@@ -164,6 +216,7 @@ class DBManager:
                  - email----password----recovery_email (3段，第3段含@)
                  - email----password----secret_key (3段，第3段不含@)
                  - email----password----recovery_email----secret_key (4段)
+                 - email----password----recovery_email----secret_key----date_range (5段，忽略最后日期)
                  - link----email----password----... (带链接前缀)
         """
         if not line or not line.strip():
@@ -195,6 +248,13 @@ class DBManager:
         # 分割字段
         parts = line.split(separator)
         parts = [p.strip() for p in parts if p.strip()]
+        
+        # 过滤掉日期范围字段（如 "2020-2024", "2019-2023" 等）
+        def is_date_range(s):
+            import re
+            return bool(re.match(r'^\d{4}-\d{4}$', s))
+        
+        parts = [p for p in parts if not is_date_range(p)]
         
         if len(parts) < 2:
             return None
@@ -244,12 +304,26 @@ class DBManager:
     def import_accounts_from_text(text, separator='----', default_status='pending_check'):
         """
         @brief 从文本批量导入账号到数据库
-        @param text 多行文本，每行一个账号
+        @param text 多行文本，每行一个账号（也支持同一行多个账号用空格分隔）
         @param separator 分隔符
         @param default_status 默认状态
         @return (success_count, error_count, errors)
         """
-        lines = text.strip().split('\n')
+        # 预处理：将同一行多个账号（以邮箱开头）拆分成多行
+        import re
+        # 先按换行分割
+        raw_lines = text.strip().split('\n')
+        lines = []
+        for raw_line in raw_lines:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            # 检测是否有多个邮箱在同一行（以空格分隔的多个账号）
+            # 模式：在空格后紧跟邮箱格式的地方分割
+            # 例如: "2020-2024 email@domain.com" -> 在 "2024 " 后分割
+            parts = re.split(r'\s+(?=[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', raw_line)
+            lines.extend([p.strip() for p in parts if p.strip()])
+        
         success_count = 0
         error_count = 0
         errors = []
@@ -317,7 +391,8 @@ class DBManager:
                     if message is not None: fields.append("message = ?"); values.append(message)
                     
                     if fields:
-                        fields.append("updated_at = CURRENT_TIMESTAMP")
+                        fields.append("updated_at = ?")
+                        values.append(get_local_timestamp())
                         values.append(email)
                         sql = f"UPDATE accounts SET {', '.join(fields)} WHERE email = ?"
                         cursor.execute(sql, values)
@@ -412,9 +487,45 @@ class DBManager:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE accounts 
-                SET browser_id = ?, updated_at = CURRENT_TIMESTAMP
+                SET browser_id = ?, updated_at = ?
                 WHERE email = ?
-            """, (browser_id, email))
+            """, (browser_id, get_local_timestamp(), email))
+            conn.commit()
+            conn.close()
+    
+    @staticmethod
+    def update_account_recovery_email(email: str, recovery_email: str):
+        """
+        @brief 更新账号的辅助邮箱
+        @param email 账号邮箱
+        @param recovery_email 新的辅助邮箱
+        """
+        with lock:
+            conn = DBManager.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE accounts 
+                SET recovery_email = ?, recovery_updated_at = ?, updated_at = ?
+                WHERE email = ?
+            """, (recovery_email, get_local_timestamp(), get_local_timestamp(), email))
+            conn.commit()
+            conn.close()
+    
+    @staticmethod
+    def update_account_secret_key(email: str, secret_key: str):
+        """
+        @brief 更新账号的2FA密钥
+        @param email 账号邮箱
+        @param secret_key 新的2FA密钥
+        """
+        with lock:
+            conn = DBManager.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE accounts 
+                SET secret_key = ?, secret_updated_at = ?, updated_at = ?
+                WHERE email = ?
+            """, (secret_key, get_local_timestamp(), get_local_timestamp(), email))
             conn.commit()
             conn.close()
     
@@ -435,6 +546,23 @@ class DBManager:
             rows = cursor.fetchall()
             conn.close()
             return {row['status']: row['count'] for row in rows}
+
+    @staticmethod
+    def get_account_by_browser_id(browser_id: str):
+        """
+        @brief 根据 browser_id 获取账号信息
+        @param browser_id 浏览器窗口ID
+        @return 账号字典或None
+        """
+        if not browser_id:
+            return None
+        with lock:
+            conn = DBManager.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM accounts WHERE browser_id = ?", (browser_id,))
+            row = cursor.fetchone()
+            conn.close()
+            return dict(row) if row else None
     
     @staticmethod
     def get_sheerid_link_by_browser(browser_id: str) -> str:
@@ -486,9 +614,9 @@ class DBManager:
             # 查找包含此验证ID的账号
             cursor.execute("""
                 UPDATE accounts 
-                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                SET status = ?, updated_at = ?
                 WHERE verification_link LIKE ?
-            """, (status, f'%{verification_id}%'))
+            """, (status, get_local_timestamp(), f'%{verification_id}%'))
             conn.commit()
             conn.close()
     
@@ -545,8 +673,8 @@ class DBManager:
         """
         line = line.strip()
         
-        # 格式1: socks5://user:pass@host:port
-        match = re.match(r'^(socks5|http|https)://([^:]+):([^@]+)@([^:]+):(\d+)$', line)
+        # 格式1: socks5/http/https/ssh://user:pass@host:port
+        match = re.match(r'^(socks5|http|https|ssh)://([^:]+):([^@]+)@([^:]+):(\d+)$', line)
         if match:
             return {
                 'type': match.group(1),
@@ -555,12 +683,22 @@ class DBManager:
                 'host': match.group(4),
                 'port': match.group(5)
             }
+
+        # 格式1b: ssh://user@host:port
+        match = re.match(r'^(ssh)://([^@]+)@([^:]+):(\d+)$', line)
+        if match:
+            return {
+                'type': match.group(1),
+                'username': match.group(2),
+                'password': None,
+                'host': match.group(3),
+                'port': match.group(4)
+            }
         
         # 格式2: host:port:user:pass
         parts = line.split(':')
         if len(parts) == 4:
             return {
-                'type': 'socks5',
                 'host': parts[0],
                 'port': parts[1],
                 'username': parts[2],
@@ -570,7 +708,6 @@ class DBManager:
         # 格式3: host:port
         if len(parts) == 2:
             return {
-                'type': 'socks5',
                 'host': parts[0],
                 'port': parts[1],
                 'username': None,
@@ -682,8 +819,11 @@ class DBManager:
         @param max_usage 最大使用次数
         @return (success_count, error_count, errors)
         @details 支持格式:
-                 - card_number exp_month exp_year cvv [holder_name]
+                 - card_number exp_month exp_year cvv [holder_name] [zip_code] [country]
+                 - card_number MM/YY cvv [holder_name] [zip_code] [country]
                  - card_number----exp_month----exp_year----cvv
+                 - key=value（推荐，可选字段含空格时更稳）：
+                   name=张三 zip=310000 country=China state=CA city=LA address=1st_street
         """
         lines = text.strip().split('\n')
         success_count = 0
@@ -705,6 +845,10 @@ class DBManager:
                         cvv=card['cvv'],
                         holder_name=card.get('holder_name'),
                         zip_code=card.get('zip_code'),
+                        country=card.get('country'),
+                        state=card.get('state'),
+                        city=card.get('city'),
+                        address=card.get('address'),
                         max_usage=max_usage
                     )
                     success_count += 1
@@ -731,7 +875,9 @@ class DBManager:
                  - 卡号 月 年 CVV 持卡人
                  - 卡号 月 年 CVV 邮编（纯数字）
                  - 卡号 月 年 CVV 持卡人 邮编
-                 智能识别：纯数字=邮编，含字母=持卡人
+                 - 卡号 月 年 CVV 邮编 国家
+                 - 卡号 月 年 CVV 持卡人 邮编 国家
+                 智能识别：纯数字=邮编；若尾部形如“邮编 国家”，则额外记录国家
         """
         line = line.strip()
         
@@ -741,7 +887,11 @@ class DBManager:
             'exp_year': None,
             'cvv': None,
             'holder_name': None,
-            'zip_code': None
+            'zip_code': None,
+            'country': None,
+            'state': None,
+            'city': None,
+            'address': None,
         }
         
         # 尝试空格分隔
@@ -753,35 +903,131 @@ class DBManager:
         if len(parts) < 4:
             return None
         
-        # 前4个字段是固定的：卡号、月、年、CVV
         result['number'] = parts[0].replace('-', '').replace(' ', '')
-        result['exp_month'] = parts[1]
-        result['exp_year'] = parts[2]
-        result['cvv'] = parts[3]
-        
-        # 处理第5、6个字段（可能是持卡人、邮编或两者都有）
-        if len(parts) >= 5:
-            fifth = parts[4]
-            # 判断第5个字段是持卡人还是邮编
-            if fifth.isdigit():
-                # 纯数字，是邮编
-                result['zip_code'] = fifth
+
+        # 兼容格式：卡号 MM/YY CVV [持卡人] [邮编]
+        tail_index = 4
+        if len(parts) >= 3 and '/' in parts[1]:
+            exp_parts = parts[1].split('/', 1)
+            if len(exp_parts) == 2 and exp_parts[0] and exp_parts[1]:
+                result['exp_month'] = exp_parts[0]
+                result['exp_year'] = exp_parts[1]
+                result['cvv'] = parts[2]
+                tail_index = 3
             else:
-                # 含字母，是持卡人
-                # 如果持卡人名字有多个单词，需要合并
-                if len(parts) >= 6 and parts[-1].isdigit():
-                    # 最后一项是邮编，中间都是持卡人名字
-                    result['holder_name'] = ' '.join(parts[4:-1])
-                    result['zip_code'] = parts[-1]
-                else:
-                    # 没有邮编，剩下的都是持卡人名字
-                    result['holder_name'] = ' '.join(parts[4:])
+                result['exp_month'] = parts[1]
+                result['exp_year'] = parts[2]
+                result['cvv'] = parts[3]
+        else:
+            # 默认格式：卡号 月 年 CVV
+            result['exp_month'] = parts[1]
+            result['exp_year'] = parts[2]
+            result['cvv'] = parts[3]
+        
+        # 处理尾部字段（可能是持卡人/邮编/国家/地址信息）
+        tail = parts[tail_index:]
+        if tail:
+            key_map = {
+                'name': 'holder_name',
+                'holder': 'holder_name',
+                'holder_name': 'holder_name',
+                'zip': 'zip_code',
+                'zip_code': 'zip_code',
+                'postal': 'zip_code',
+                'country': 'country',
+                'state': 'state',
+                'province': 'state',
+                'region': 'state',
+                'city': 'city',
+                'address': 'address',
+                'addr': 'address',
+                'street': 'address',
+                'billing_address': 'address',
+            }
+
+            # 支持 key=value（允许 value 含空格）
+            if any('=' in t for t in tail):
+                positional: list[str] = []
+                current_key = None
+                current_values: list[str] = []
+
+                def commit():
+                    nonlocal current_key, current_values
+                    if current_key:
+                        value = ' '.join(v for v in current_values if v).strip()
+                        if value:
+                            result[current_key] = value
+                    current_key = None
+                    current_values = []
+
+                for token in tail:
+                    if '=' in token:
+                        k, v = token.split('=', 1)
+                        mapped = key_map.get(k.strip().lower())
+                        if mapped:
+                            commit()
+                            current_key = mapped
+                            if v:
+                                current_values = [v]
+                            continue
+                    if current_key:
+                        current_values.append(token)
+                    else:
+                        positional.append(token)
+                commit()
+
+                tail = positional
+                if not tail:
+                    return result
+
+            zip_idx = None
+            for i, tok in enumerate(tail):
+                if tok.isdigit():
+                    zip_idx = i
+                    break
+
+            # 空格格式：... [持卡人(可含空格)] 邮编 国家 省/州 城市 [地址(可含空格)]
+            if zip_idx is not None:
+                if not result.get('holder_name') and zip_idx > 0:
+                    result['holder_name'] = ' '.join(tail[:zip_idx]).strip()
+
+                if not result.get('zip_code'):
+                    result['zip_code'] = tail[zip_idx]
+
+                rest = tail[zip_idx + 1 :]
+                if rest:
+                    if not result.get('country'):
+                        result['country'] = rest[0]
+                    if len(rest) > 1 and not result.get('state'):
+                        result['state'] = rest[1]
+                    if len(rest) > 2 and not result.get('city'):
+                        result['city'] = rest[2]
+                    if len(rest) > 3 and not result.get('address'):
+                        result['address'] = ' '.join(rest[3:]).strip()
+
+                return result
+
+            if not result.get('holder_name'):
+                result['holder_name'] = ' '.join(tail).strip()
         
         return result
     
     @staticmethod
-    def add_card(card_number, exp_month, exp_year, cvv, holder_name=None, 
-                 billing_address=None, remark=None, max_usage=1, zip_code=None):
+    def add_card(
+        card_number,
+        exp_month,
+        exp_year,
+        cvv,
+        holder_name=None,
+        address=None,
+        city=None,
+        state=None,
+        billing_address=None,
+        remark=None,
+        max_usage=1,
+        zip_code=None,
+        country=None,
+    ):
         """
         @brief 添加卡片
         @return 卡片ID
@@ -790,15 +1036,103 @@ class DBManager:
             conn = DBManager.get_connection()
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO cards (card_number, exp_month, exp_year, cvv, 
-                                  holder_name, zip_code, billing_address, remark, max_usage)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (card_number, exp_month, exp_year, cvv, holder_name, 
-                  zip_code, billing_address, remark, max_usage))
+                INSERT INTO cards (
+                    card_number,
+                    exp_month,
+                    exp_year,
+                    cvv,
+                    holder_name,
+                    zip_code,
+                    country,
+                    state,
+                    city,
+                    address,
+                    billing_address,
+                    remark,
+                    max_usage
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                card_number,
+                exp_month,
+                exp_year,
+                cvv,
+                holder_name,
+                zip_code,
+                country,
+                state,
+                city,
+                address,
+                billing_address,
+                remark,
+                max_usage,
+            ))
             card_id = cursor.lastrowid
             conn.commit()
             conn.close()
             return card_id
+
+    @staticmethod
+    def update_card(
+        card_id: int,
+        exp_month=None,
+        exp_year=None,
+        cvv=None,
+        holder_name=None,
+        zip_code=None,
+        country=None,
+        state=None,
+        city=None,
+        address=None,
+        max_usage=None,
+        is_active=None,
+    ):
+        """
+        @brief 更新卡片信息（支持部分字段）
+        """
+        fields = {}
+        if exp_month is not None:
+            fields['exp_month'] = str(exp_month).strip()
+        if exp_year is not None:
+            fields['exp_year'] = str(exp_year).strip()
+        if cvv is not None:
+            fields['cvv'] = str(cvv).strip()
+        if holder_name is not None:
+            fields['holder_name'] = str(holder_name).strip()
+        if zip_code is not None:
+            fields['zip_code'] = str(zip_code).strip()
+        if country is not None:
+            fields['country'] = str(country).strip()
+        if state is not None:
+            fields['state'] = str(state).strip()
+        if city is not None:
+            fields['city'] = str(city).strip()
+        if address is not None:
+            fields['address'] = str(address).strip()
+        if max_usage is not None:
+            fields['max_usage'] = int(max_usage)
+        if is_active is not None:
+            if isinstance(is_active, str):
+                normalized = is_active.strip().lower()
+                fields['is_active'] = 1 if normalized in ('1', 'true', 'yes', 'y', 'on') else 0
+            else:
+                fields['is_active'] = 1 if bool(is_active) else 0
+
+        if not fields:
+            return
+
+        set_sql = ', '.join([f"{k} = ?" for k in fields.keys()])
+        values = list(fields.values()) + [int(card_id)]
+
+        with lock:
+            conn = DBManager.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE cards SET {set_sql}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                values,
+            )
+            conn.commit()
+            conn.close()
     
     @staticmethod
     def get_all_cards():
@@ -1056,125 +1390,116 @@ class DBManager:
         @brief 从比特浏览器窗口导入账号
         """
         import threading
-        
+
         def _run_import():
             try:
                 # 延迟导入避免循环依赖
                 try:
-                    from ..google.backend.create_window import get_browser_list, parse_account_line
+                    from ..google.backend.create_window import get_browser_list
                 except ImportError:
                     # 兼容旧路径
-                    from create_window import get_browser_list, parse_account_line
-                
+                    from create_window import get_browser_list
+
                 page = 0
                 page_size = 50
                 total_imported = 0
                 total_updated = 0
-                
+
                 print(f"[DB] 开始从浏览器导入 (每页 {page_size} 条)...")
-                
+
                 while True:
                     try:
                         browser_list = get_browser_list(page=page, pageSize=page_size)
                     except Exception as e:
                         print(f"[DB] 获取浏览器列表失败(页{page}): {e}")
                         break
-                        
-                    if not browser_list or len(browser_list) == 0:
+
+                    if not browser_list:
                         break
-                    
+
                     current_imported = 0
                     current_updated = 0
-                    
+
                     for browser in browser_list:
                         browser_id = browser.get('id', '')
-                        remark = browser.get('remark', '').strip()
-                        
+                        remark = (browser.get('remark', '') or '').strip()
+
                         if not remark or not browser_id:
                             continue
-                        
-                        parts = remark.split('----')
-                        account = {}
-                        
-                        if len(parts) >= 1 and '@' in parts[0]:
-                            account['email'] = parts[0].strip()
-                            if len(parts) >= 2:
-                                account['password'] = parts[1].strip()
-                            for part in parts[2:]:
-                                p = part.strip()
-                                if not p:
-                                    continue
-                                if '@' in p and '.' in p:
-                                    account['backup_email'] = p
-                                else:
-                                    account['2fa_secret'] = p
-                        else:
-                            account = parse_account_line(remark, '----')
-                        
-                        if account and account.get('email'):
-                            email = account.get('email')
-                            
-                            try:
-                                with lock:
-                                    conn = DBManager.get_connection()
-                                    cursor = conn.cursor()
-                                    cursor.execute('SELECT browser_id, password, secret_key FROM accounts WHERE email = ?', (email,))
-                                    row = cursor.fetchone()
-                                    
-                                    if row:
-                                        updates = []
-                                        values = []
-                                        
-                                        if not row[0]:
-                                            updates.append("browser_id = ?")
-                                            values.append(browser_id)
-                                        
-                                        if not row[1] and account.get('password'):
-                                            updates.append("password = ?")
-                                            values.append(account.get('password'))
-                                            
-                                        if not row[2] and account.get('2fa_secret'):
-                                            updates.append("secret_key = ?")
-                                            values.append(account.get('2fa_secret'))
-                                        
-                                        if updates:
-                                            values.append(email)
-                                            sql = f"UPDATE accounts SET {', '.join(updates)} WHERE email = ?"
-                                            cursor.execute(sql, values)
-                                            conn.commit()
-                                            current_updated += 1
-                                    else:
-                                        cursor.execute('''
-                                            INSERT INTO accounts (email, password, recovery_email, secret_key, 
-                                                                verification_link, browser_id, status, message)
-                                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                                        ''', (
-                                            email, 
-                                            account.get('password'), 
-                                            account.get('backup_email'), 
-                                            account.get('2fa_secret'), 
-                                            None, 
-                                            browser_id, 
-                                            'pending_check', 
-                                            None
-                                        ))
+
+                        parsed = DBManager._parse_account_line(remark, '----') or {}
+                        email = parsed.get('email')
+                        if not email:
+                            continue
+
+                        account = {
+                            'email': email,
+                            'password': parsed.get('password'),
+                            'backup_email': parsed.get('recovery_email'),
+                            '2fa_secret': parsed.get('secret_key'),
+                        }
+
+                        try:
+                            with lock:
+                                conn = DBManager.get_connection()
+                                cursor = conn.cursor()
+                                cursor.execute('SELECT browser_id, password, secret_key FROM accounts WHERE email = ?', (email,))
+                                row = cursor.fetchone()
+
+                                if row:
+                                    updates = []
+                                    values = []
+
+                                    if not row[0]:
+                                        updates.append("browser_id = ?")
+                                        values.append(browser_id)
+
+                                    if not row[1] and account.get('password'):
+                                        updates.append("password = ?")
+                                        values.append(account.get('password'))
+
+                                    if not row[2] and account.get('2fa_secret'):
+                                        updates.append("secret_key = ?")
+                                        values.append(account.get('2fa_secret'))
+
+                                    if updates:
+                                        values.append(email)
+                                        sql = f"UPDATE accounts SET {', '.join(updates)} WHERE email = ?"
+                                        cursor.execute(sql, values)
                                         conn.commit()
-                                        current_imported += 1
-                                    
-                                    conn.close()
-                            except Exception as e:
-                                print(f"[DB] 处理账号 {email} 出错: {e}")
+                                        current_updated += 1
+                                else:
+                                    cursor.execute('''
+                                        INSERT INTO accounts (email, password, recovery_email, secret_key,
+                                                            verification_link, browser_id, status, message)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                    ''', (
+                                        email,
+                                        account.get('password'),
+                                        account.get('backup_email'),
+                                        account.get('2fa_secret'),
+                                        None,
+                                        browser_id,
+                                        'pending_check',
+                                        None
+                                    ))
+                                    conn.commit()
+                                    current_imported += 1
+
+                                conn.close()
+                        except Exception as e:
+                            print(f"[DB] 处理账号 {email} 出错: {e}")
 
                     total_imported += current_imported
                     total_updated += current_updated
                     print(f"[DB] 第 {page+1} 页处理完成: 新增 {current_imported}, 更新 {current_updated}")
-                    
+
                     page += 1
                     import time
                     time.sleep(0.5)
-                
+
                 print(f"[DB] 浏览器导入完成! 新增 {total_imported}, 更新 {total_updated}")
-                
+
             except Exception as e:
                 print(f"[DB] 导入异常: {e}")
                 import traceback
@@ -1279,4 +1604,3 @@ class DBManager:
             rows = cursor.fetchall()
             conn.close()
             return [dict(row) for row in rows]
-

@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from playwright.async_api import async_playwright, Page
 
 from .google_auth import google_login, check_google_one_status
+from .google_one_detector import detect_google_one_status_dom
 from .account_manager import AccountManager
 
 
@@ -91,17 +92,8 @@ class SheerLinkService:
         if bit_api:
             browser_info = bit_api['info'](browser_id)
             if browser_info:
-                remark = browser_info.get('remark', '')
-                parts = remark.split('----')
-                if len(parts) >= 4:
-                    account_info = {
-                        'email': parts[0].strip(),
-                        'password': parts[1].strip(),
-                        'backup': parts[2].strip(),
-                        'backup_email': parts[2].strip(),
-                        'secret': parts[3].strip(),
-                        '2fa_secret': parts[3].strip()
-                    }
+                from core.database import build_account_info_from_remark
+                account_info = build_account_info_from_remark(browser_info.get('remark', ''))
         
         return account_info
     
@@ -136,7 +128,9 @@ class SheerLinkService:
         if not ws_endpoint:
             bit_api['close'](browser_id)
             return False, "无法获取WebSocket端点"
-        
+
+        keep_open = False
+
         try:
             async with async_playwright() as playwright:
                 browser = await playwright.chromium.connect_over_cdp(ws_endpoint)
@@ -152,6 +146,8 @@ class SheerLinkService:
                 from .google_auth import ensure_google_login
                 login_success, login_msg = await ensure_google_login(page, account_info)
                 if not login_success:
+                    if "人工" in login_msg or "验证码" in login_msg or "机器人" in login_msg:
+                        keep_open = True
                     return False, f"登录失败: {login_msg}"
                 self.log(f"登录状态: {login_msg}")
                 await asyncio.sleep(2)
@@ -172,9 +168,16 @@ class SheerLinkService:
                         else:
                             return False, f"导航失败: {e}"
                 
-                # 检测状态
+                # 检测状态（优先复用 bitbrowser-automation 的 DOM/短语检测；必要时回退到 API 检测）
                 self.log("检测学生资格...")
-                status, extra_data = await check_google_one_status(page, timeout=10)
+                status, extra_data = await detect_google_one_status_dom(page, timeout_seconds=20)
+                if status == "timeout":
+                    try:
+                        status2, extra2 = await check_google_one_status(page, timeout=20)
+                        if status2:
+                            status, extra_data = status2, extra2
+                    except Exception:
+                        pass
                 
                 # 构建账号行
                 acc_line = email
@@ -225,8 +228,11 @@ class SheerLinkService:
             traceback.print_exc()
             return False, f"错误: {str(e)}"
         finally:
-            self.log(f"关闭浏览器: {browser_id}")
-            bit_api['close'](browser_id)
+            if keep_open:
+                self.log(f"保留浏览器窗口(需人工处理): {browser_id}")
+            else:
+                self.log(f"关闭浏览器: {browser_id}")
+                bit_api['close'](browser_id)
     
     def extract_sheerlink_sync(
         self,

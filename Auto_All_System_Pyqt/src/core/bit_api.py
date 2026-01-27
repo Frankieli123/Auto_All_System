@@ -553,13 +553,22 @@ class BitBrowserAPI:
 # ==================== 兼容旧函数接口 ====================
 
 # 全局API实例
-_api_instance: Optional[BitBrowserAPI] = None
+_api_instance: Optional[Any] = None
+_api_backend: Optional[str] = None
 
-def get_api() -> BitBrowserAPI:
+def get_api() -> Any:
     """获取全局API实例（单例模式）"""
-    global _api_instance
-    if _api_instance is None:
-        _api_instance = BitBrowserAPI()
+    global _api_instance, _api_backend
+    from .backend_config import get_backend, get_bitbrowser_api_url, get_geekez_api_url
+
+    backend = get_backend()
+    if _api_instance is None or _api_backend != backend:
+        if backend == "geekez":
+            from .geekez_api import GeekezAPI
+            _api_instance = GeekezAPI(base_url=get_geekez_api_url())
+        else:
+            _api_instance = BitBrowserAPI(base_url=get_bitbrowser_api_url())
+        _api_backend = backend
     return _api_instance
 
 
@@ -752,6 +761,83 @@ def create_browser_from_account(
     @param extra_url 额外URL
     @return (browser_id, error_message)
     """
+    from .backend_config import is_geekez_backend
+
+    if is_geekez_backend():
+        api = get_api()
+
+        email = (account.get('email') or '').strip()
+        password = account.get('password') or ''
+        backup_email = account.get('backup_email') or account.get('recovery_email') or ''
+        secret = account.get('2fa_secret') or account.get('secret_key') or ''
+
+        # 检查是否已存在该账号（通过 remark 第一个字段匹配 email）
+        browsers = get_browser_list_simple(page=0, page_size=1000)
+        for b in browsers:
+            remark = str(b.get('remark') or '')
+            first = remark.split('----')[0].strip().lower() if remark else ''
+            if email and first == email.lower():
+                return None, f"该账号已有对应窗口: {b.get('name')} (ID: {b.get('id')})"
+
+        fingerprint = None
+        tags = None
+        pre_proxy_override = None
+        if template_id:
+            tpl = api.get_browser_detail(template_id)
+            if tpl.get('success'):
+                data = tpl.get('data') or {}
+                if isinstance(data, dict):
+                    fingerprint = data.get('fingerprint')
+                    tags = data.get('tags')
+                    pre_proxy_override = data.get('preProxyOverride')
+            else:
+                return None, f"找不到模板窗口: {template_id}"
+
+        proxy_str = ""
+        if proxy:
+            raw = str(proxy.get("raw") or "").strip()
+            if raw:
+                proxy_str = raw
+                if "://" in proxy_str:
+                    scheme, rest = proxy_str.split("://", 1)
+                    proxy_str = f"{scheme.strip().lower()}://{rest}"
+            else:
+                t = str(proxy.get('type') or 'socks5').strip().lower() or 'socks5'
+                host = str(proxy.get('host') or '').strip()
+                port = str(proxy.get('port') or '').strip()
+                username = str(proxy.get('username') or '').strip()
+                pwd = str(proxy.get('password') or '').strip()
+                if host and port:
+                    auth = ""
+                    if username and pwd:
+                        auth = f"{username}:{pwd}@"
+                    elif username:
+                        auth = f"{username}@"
+                    proxy_str = f"{t}://{auth}{host}:{port}"
+
+        name = get_next_window_name(name_prefix)
+        remark_parts = [email, password, backup_email, secret]
+        remark = '----'.join([str(p or '') for p in remark_parts])
+
+        payload: Dict[str, Any] = {"remark": remark, "proxyStr": proxy_str}
+        if isinstance(fingerprint, dict) and fingerprint:
+            payload["fingerprint"] = fingerprint
+        if isinstance(tags, list):
+            payload["tags"] = tags
+        if pre_proxy_override:
+            payload["preProxyOverride"] = pre_proxy_override
+
+        try:
+            result = api.create_browser(name=name, **payload)
+            if result.get('success'):
+                browser_id = (result.get('data') or {}).get('id')
+                if not browser_id:
+                    return None, "API返回成功但未获取到ID"
+                return browser_id, None
+            return None, result.get('error') or result.get('msg') or '创建失败'
+        except Exception as e:
+            return None, f"请求异常: {str(e)}"
+
     api = get_api()
     
     # 确定模板配置
@@ -780,13 +866,13 @@ def create_browser_from_account(
     json_data['name'] = get_next_window_name(name_prefix)
     
     # 设置备注（格式：email----password----backup_email----2fa_secret）
-    email = account.get('email', '')
-    password = account.get('password', '')
-    backup_email = account.get('backup_email', account.get('recovery_email', ''))
-    secret = account.get('2fa_secret', account.get('secret_key', ''))
+    email = account.get('email') or ''
+    password = account.get('password') or ''
+    backup_email = account.get('backup_email') or account.get('recovery_email') or ''
+    secret = account.get('2fa_secret') or account.get('secret_key') or ''
     
     remark_parts = [email, password, backup_email, secret]
-    json_data['remark'] = '----'.join(remark_parts)
+    json_data['remark'] = '----'.join([str(p or '') for p in remark_parts])
     
     # 设置账号信息
     if email:
@@ -808,7 +894,7 @@ def create_browser_from_account(
     
     # 设置代理
     if proxy:
-        json_data['proxyType'] = proxy.get('type', 'socks5')
+        json_data['proxyType'] = str(proxy.get('type', 'socks5') or 'socks5').strip().lower() or 'socks5'
         json_data['proxyMethod'] = 2
         json_data['host'] = proxy.get('host', '')
         json_data['port'] = str(proxy.get('port', ''))
@@ -856,7 +942,7 @@ def create_browsers_batch(
     @param name_prefix 窗口名称前缀
     @param template_config 模板配置
     @param template_id 模板窗口ID
-    @param proxies 代理列表
+    @param proxies 代理列表（每个代理需包含 'id' 字段用于标记使用者）
     @param platform_url 平台URL
     @param extra_url 额外URL
     @param callback 回调函数 callback(index, account, browser_id, error)
@@ -866,6 +952,13 @@ def create_browsers_batch(
     success_count = 0
     proxy_index = 0
     
+    # 导入数据库模块用于标记代理使用者
+    try:
+        from core.database import DBManager
+        db_available = True
+    except ImportError:
+        db_available = False
+    
     for i, account in enumerate(accounts):
         # 检查停止标志
         if stop_check and stop_check():
@@ -873,8 +966,10 @@ def create_browsers_batch(
         
         # 分配代理
         proxy = None
+        proxy_id = None
         if proxies and proxy_index < len(proxies):
             proxy = proxies[proxy_index]
+            proxy_id = proxy.get('id')  # 保存代理ID
             proxy_index += 1
         
         # 创建窗口
@@ -890,6 +985,13 @@ def create_browsers_batch(
         
         if browser_id:
             success_count += 1
+            # 标记代理已被使用
+            if db_available and proxy_id:
+                try:
+                    email = account.get('email', '')
+                    DBManager.mark_proxy_used(proxy_id, email)
+                except Exception:
+                    pass  # 忽略标记失败
         
         # 回调
         if callback:
@@ -915,17 +1017,13 @@ if __name__ == "__main__":
 
 
 # ==================== 便捷函数 ====================
-# 全局API实例
-_api = BitBrowserAPI()
-
-
 def open_browser(browser_id: str, **kwargs) -> dict:
     """
     @brief 打开浏览器窗口
     @param browser_id 窗口ID
     @return API响应
     """
-    return _api.open_browser(browser_id, **kwargs)
+    return get_api().open_browser(browser_id, **kwargs)
 
 
 def close_browser(browser_id: str) -> dict:
@@ -934,7 +1032,7 @@ def close_browser(browser_id: str) -> dict:
     @param browser_id 窗口ID
     @return API响应
     """
-    return _api.close_browser(browser_id)
+    return get_api().close_browser(browser_id)
 
 
 def get_browser_info(browser_id: str) -> dict:
@@ -943,7 +1041,7 @@ def get_browser_info(browser_id: str) -> dict:
     @param browser_id 窗口ID
     @return 浏览器信息
     """
-    result = _api.get_browser_detail(browser_id)
+    result = get_api().get_browser_detail(browser_id)
     if result.get('success'):
         return result.get('data', {})
     return {}
@@ -955,6 +1053,4 @@ def delete_browser(browser_id: str) -> dict:
     @param browser_id 窗口ID
     @return API响应
     """
-    return _api.delete_browser(browser_id)
-
-
+    return get_api().delete_browser(browser_id)

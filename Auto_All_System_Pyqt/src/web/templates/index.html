@@ -351,6 +351,10 @@
                     <th>CVV</th>
                     <th>持卡人</th>
                     <th>邮编</th>
+                    <th>国家/地区</th>
+                    <th>省/州</th>
+                    <th>城市</th>
+                    <th>地址</th>
                     <th>使用次数</th>
                     <th>状态</th>
                     <th>操作</th>
@@ -513,9 +517,10 @@
             id="import-proxies-text"
             rows="10"
             placeholder="每行一个代理，支持格式：
-socks5://user:pass@host:port
-host:port:user:pass
-host:port"
+ socks5://user:pass@host:port
+ ssh://user:pass@host:22
+ host:port:user:pass
+ host:port"
           ></textarea>
         </div>
         <div class="form-group">
@@ -524,6 +529,7 @@ host:port"
             <option value="socks5">SOCKS5</option>
             <option value="http">HTTP</option>
             <option value="https">HTTPS</option>
+            <option value="ssh">SSH</option>
           </select>
         </div>
       </div>
@@ -546,8 +552,10 @@ host:port"
             class="textarea"
             id="import-cards-text"
             rows="10"
-            placeholder="每行一张卡，格式：卡号 月 年 CVV [持卡人] [邮编]
-持卡人含字母自动识别，邮编为纯数字自动识别"
+            placeholder="每行一张卡（空格分隔）：
+卡号 有效期(CM/YY 或 月 年) CVV [持卡人] 邮编 国家/地区 [省/州] [城市] [地址(可含空格)]
+示例：4514... 06/30 255 小明 310000 中国 shanghai shanghai
+推荐 key=value（字段可乱序，值可含空格）：name=小明 zip=310000 country=中国 state=shanghai city=shanghai address=浦东新区xx路"
           ></textarea>
         </div>
         <div class="form-group">
@@ -564,6 +572,134 @@ host:port"
       <div class="modal-footer">
         <button class="btn btn-ghost" onclick="closeModal()">取消</button>
         <button class="btn btn-primary" onclick="importCards()">导入</button>
+      </div>
+    </div>
+
+    <!-- 编辑卡片模态框 -->
+    <div class="modal" id="modal-edit-card">
+      <div class="modal-header">
+        <h3 class="modal-title">编辑卡片</h3>
+        <button class="modal-close" onclick="closeModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="edit-card-id" />
+        <div class="form-group">
+          <label class="label">卡号</label>
+          <input
+            type="text"
+            class="input"
+            id="edit-card-number"
+            readonly
+            disabled
+          />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="label">有效期(月)</label>
+            <input type="number" class="input" id="edit-card-month" min="1" max="12" />
+          </div>
+          <div class="form-group">
+            <label class="label">有效期(年)</label>
+            <input type="number" class="input" id="edit-card-year" min="0" />
+          </div>
+          <div class="form-group">
+            <label class="label">CVV</label>
+            <input type="text" class="input" id="edit-card-cvv" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="label">持卡人</label>
+          <input type="text" class="input" id="edit-card-holder" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="label">邮编</label>
+            <input type="text" class="input" id="edit-card-zip" />
+          </div>
+          <div class="form-group">
+            <label class="label">国家/地区</label>
+            <input type="text" class="input" id="edit-card-country" />
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="label">省/州</label>
+            <input type="text" class="input" id="edit-card-state" />
+          </div>
+          <div class="form-group">
+            <label class="label">城市</label>
+            <input type="text" class="input" id="edit-card-city" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="label">地址</label>
+          <input type="text" class="input" id="edit-card-address" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="label">最大使用次数</label>
+            <input type="number" class="input" id="edit-card-max-usage" min="1" />
+          </div>
+          <div class="form-group">
+            <label class="label">状态</label>
+            <select class="select" id="edit-card-active">
+              <option value="true">启用</option>
+              <option value="false">禁用</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveEditCard()">保存</button>
+      </div>
+    </div>
+
+    <!-- 编辑账号模态框 -->
+    <div class="modal" id="modal-edit-account">
+      <div class="modal-header">
+        <h3 class="modal-title">编辑账号</h3>
+        <button class="modal-close" onclick="closeModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="edit-account-email-original" />
+        <div class="form-group">
+          <label class="label">邮箱</label>
+          <input
+            type="text"
+            class="input"
+            id="edit-account-email"
+            readonly
+            disabled
+          />
+        </div>
+        <div class="form-group">
+          <label class="label">密码</label>
+          <input type="text" class="input" id="edit-account-password" />
+        </div>
+        <div class="form-group">
+          <label class="label">辅助邮箱</label>
+          <input type="text" class="input" id="edit-account-recovery" />
+        </div>
+        <div class="form-group">
+          <label class="label">2FA密钥</label>
+          <input type="text" class="input" id="edit-account-secret" />
+        </div>
+        <div class="form-group">
+          <label class="label">状态</label>
+          <select class="select" id="edit-account-status">
+            <option value="pending_check">待检查</option>
+            <option value="link_ready">链接就绪</option>
+            <option value="verified">已验证</option>
+            <option value="subscribed">已订阅</option>
+            <option value="ineligible">无资格</option>
+            <option value="error">错误</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveEditAccount()">保存</button>
       </div>
     </div>
 

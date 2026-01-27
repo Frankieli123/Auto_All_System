@@ -17,6 +17,11 @@ LEGACY_DIR = os.path.join(SRC_DIR, '_legacy')
 if LEGACY_DIR not in sys.path:
     sys.path.insert(0, LEGACY_DIR)
 
+# 解决第三方 google 命名空间包占用导致导入 google.backend 失败
+_google_mod = sys.modules.get('google')
+if _google_mod is not None and getattr(_google_mod, '__file__', None) is None:
+    sys.modules.pop('google', None)
+
 # 初始化核心模块
 try:
     from core.database import DBManager
@@ -179,5 +184,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 

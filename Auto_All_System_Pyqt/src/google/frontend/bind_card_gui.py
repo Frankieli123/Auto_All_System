@@ -179,16 +179,27 @@ class BindCardWorker(QThread):
                 return False, "无法获取浏览器信息"
             
             remark = target_browser.get('remark', '')
-            parts = remark.split('----')
-            
             account_info = None
-            if len(parts) >= 4:
-                account_info = {
-                    'email': parts[0].strip(),
-                    'password': parts[1].strip(),
-                    'backup': parts[2].strip(),
-                    'secret': parts[3].strip()
-                }
+            try:
+                row = DBManager.get_account_by_browser_id(browser_id)
+                if row:
+                    account_info = {
+                        'email': row.get('email') or '',
+                        'password': row.get('password') or '',
+                        'backup': row.get('recovery_email') or '',
+                        'secret': row.get('secret_key') or ''
+                    }
+                else:
+                    from core.database import build_account_info_from_remark
+                    tmp = build_account_info_from_remark(remark)
+                    account_info = {
+                        'email': tmp.get('email') or '',
+                        'password': tmp.get('password') or '',
+                        'backup': tmp.get('backup') or '',
+                        'secret': tmp.get('secret') or ''
+                    }
+            except Exception:
+                account_info = None
             
             result = openBrowser(browser_id)
             if not result.get('success'):

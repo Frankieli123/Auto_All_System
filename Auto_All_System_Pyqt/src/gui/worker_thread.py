@@ -65,6 +65,12 @@ class WorkerThread(QThread):
                 self.run_bind_card()
             elif self.task_type == 'all_in_one':
                 self.run_all_in_one()
+            elif self.task_type == 'age_verification':
+                self.run_age_verification()
+            elif self.task_type == 'reset_2fa':
+                self.run_reset_2fa()
+            elif self.task_type == 'change_recovery_email':
+                self.run_change_recovery_email()
         except Exception as e:
             self.log(f"❌ 任务执行异常: {e}")
             import traceback
@@ -350,24 +356,28 @@ class WorkerThread(QThread):
             
             name = browser.get('name', '')
             remark = browser.get('remark', '')
-            
-            if '----' in remark:
-                parts = remark.split('----')
-                email = parts[0] if len(parts) > 0 else ''
-                secret = parts[3].strip() if len(parts) >= 4 else ''
-                
-                if secret:
-                    try:
-                        totp = pyotp.TOTP(secret.replace(" ", "").strip())
-                        code = totp.now()
-                        twofa_data.append({
-                            'name': name,
-                            'email': email,
-                            'secret': secret,
-                            'code': code
-                        })
-                    except Exception as e:
-                        self.log(f"  ⚠️ {email}: 2FA生成失败 - {e}")
+
+            try:
+                from core.database import parse_account_string
+                acc = parse_account_string(remark, '----') or {}
+                email = acc.get('email') or ''
+                secret = (acc.get('secret_key') or '').strip()
+            except Exception:
+                email = ''
+                secret = ''
+
+            if secret:
+                try:
+                    totp = pyotp.TOTP(secret.replace(" ", "").strip())
+                    code = totp.now()
+                    twofa_data.append({
+                        'name': name,
+                        'email': email,
+                        'secret': secret,
+                        'code': code
+                    })
+                except Exception as e:
+                    self.log(f"  ⚠️ {email}: 2FA生成失败 - {e}")
         
         self.log(f"  生成了 {len(twofa_data)} 个2FA验证码")
         
@@ -587,3 +597,210 @@ class WorkerThread(QThread):
             'stats': stats
         })
 
+    def run_age_verification(self):
+        """批量年龄验证"""
+        ids_to_process = self.kwargs.get('ids', [])
+        thread_count = self.kwargs.get('thread_count', 1)
+
+        if not ids_to_process:
+            self.finished_signal.emit({'type': 'age_verification', 'count': 0})
+            return
+
+        self.log(f"[开始] 批量年龄验证，共 {len(ids_to_process)} 个窗口，并发: {thread_count}")
+
+        try:
+            from google.backend.age_verification_service import process_age_verification
+        except ImportError as e:
+            self.log(f"❌ 导入失败: {e}")
+            self.finished_signal.emit({'type': 'age_verification', 'count': 0, 'error': str(e)})
+            return
+
+        success_count = 0
+        failures = []
+
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            future_to_id = {}
+            for bid in ids_to_process:
+                if not self.is_running:
+                    break
+                callback = lambda msg, b=bid: self.log_signal.emit(f"[{b[:8]}...] {msg}")
+                self.log(f"→ 开始年龄验证: {bid[:12]}...")
+                future = executor.submit(process_age_verification, bid, card_info=None, log_callback=callback)
+                future_to_id[future] = bid
+
+            finished_tasks = 0
+            for future in as_completed(future_to_id):
+                if not self.is_running:
+                    self.log('[用户操作] 任务已停止')
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+
+                bid = future_to_id[future]
+                finished_tasks += 1
+                self.progress_signal.emit(finished_tasks, len(ids_to_process))
+
+                try:
+                    success, msg = future.result()
+                    if success:
+                        self.log(f"✅ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
+                        success_count += 1
+                    else:
+                        self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
+                        failures.append((bid, msg))
+                except Exception as e:
+                    self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {e}")
+                    failures.append((bid, str(e)))
+
+        if failures:
+            self.log("失败明细（最多10条）：")
+            for bid, msg in failures[:10]:
+                self.log(f"  - {bid[:12]}...: {msg}")
+
+        self.log(f"年龄验证完成，成功 {success_count}/{len(ids_to_process)} 个")
+        self.finished_signal.emit({
+            'type': 'age_verification',
+            'count': success_count,
+            'total': len(ids_to_process)
+        })
+
+    def run_reset_2fa(self):
+        """批量修改/重置2FA（Authenticator）"""
+        ids_to_process = self.kwargs.get('ids', [])
+        thread_count = self.kwargs.get('thread_count', 1)
+
+        if not ids_to_process:
+            self.finished_signal.emit({'type': 'reset_2fa', 'count': 0})
+            return
+
+        self.log(f"[开始] 批量修改2FA，共 {len(ids_to_process)} 个窗口，并发: {thread_count}")
+
+        try:
+            from google.backend.reset_2fa_service import process_reset_2fa
+        except ImportError as e:
+            self.log(f"❌ 导入失败: {e}")
+            self.finished_signal.emit({'type': 'reset_2fa', 'count': 0, 'error': str(e)})
+            return
+
+        success_count = 0
+        failures = []
+
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            future_to_id = {}
+            for bid in ids_to_process:
+                if not self.is_running:
+                    break
+                callback = lambda msg, b=bid: self.log_signal.emit(f"[{b[:8]}...] {msg}")
+                self.log(f"→ 开始修改2FA: {bid[:12]}...")
+                future = executor.submit(process_reset_2fa, bid, log_callback=callback, close_after=True)
+                future_to_id[future] = bid
+
+            finished_tasks = 0
+            for future in as_completed(future_to_id):
+                if not self.is_running:
+                    self.log('[用户操作] 任务已停止')
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+
+                bid = future_to_id[future]
+                finished_tasks += 1
+                self.progress_signal.emit(finished_tasks, len(ids_to_process))
+
+                try:
+                    success, msg = future.result()
+                    if success:
+                        self.log(f"✅ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
+                        success_count += 1
+                    else:
+                        self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
+                        failures.append((bid, msg))
+                except Exception as e:
+                    self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {e}")
+                    failures.append((bid, str(e)))
+
+        if failures:
+            self.log("失败明细（最多10条）：")
+            for bid, msg in failures[:10]:
+                self.log(f"  - {bid[:12]}...: {msg}")
+
+        self.log(f"2FA修改完成，成功 {success_count}/{len(ids_to_process)} 个")
+        self.finished_signal.emit({
+            'type': 'reset_2fa',
+            'count': success_count,
+            'total': len(ids_to_process)
+        })
+
+    def run_change_recovery_email(self):
+        """批量修改辅助邮箱"""
+        ids_to_process = self.kwargs.get('ids', [])
+        thread_count = self.kwargs.get('thread_count', 1)
+        use_qq_email = self.kwargs.get('use_qq_email', False)
+        qq_email = self.kwargs.get('qq_email', '')
+        qq_auth_code = self.kwargs.get('qq_auth_code', '')
+
+        if not ids_to_process:
+            self.finished_signal.emit({'type': 'change_recovery_email', 'count': 0})
+            return
+
+        email_source = "QQ邮箱" if use_qq_email else "临时邮箱"
+        self.log(f"[开始] 批量修改辅助邮箱，共 {len(ids_to_process)} 个窗口，并发: {thread_count}，验证码来源: {email_source}")
+
+        try:
+            from google.backend.recovery_email_service import process_change_recovery_email
+        except ImportError as e:
+            self.log(f"❌ 导入失败: {e}")
+            self.finished_signal.emit({'type': 'change_recovery_email', 'count': 0, 'error': str(e)})
+            return
+
+        success_count = 0
+        failures = []
+
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            future_to_id = {}
+            for bid in ids_to_process:
+                if not self.is_running:
+                    break
+                callback = lambda msg, b=bid: self.log_signal.emit(f"[{b[:8]}...] {msg}")
+                self.log(f"→ 开始修改辅助邮箱: {bid[:12]}...")
+                future = executor.submit(
+                    process_change_recovery_email, bid,
+                    log_callback=callback, close_after=True,
+                    use_qq_email=use_qq_email,
+                    qq_email=qq_email,
+                    qq_auth_code=qq_auth_code
+                )
+                future_to_id[future] = bid
+
+            finished_tasks = 0
+            for future in as_completed(future_to_id):
+                if not self.is_running:
+                    self.log('[用户操作] 任务已停止')
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+
+                bid = future_to_id[future]
+                finished_tasks += 1
+                self.progress_signal.emit(finished_tasks, len(ids_to_process))
+
+                try:
+                    success, msg, new_email = future.result()
+                    if success:
+                        self.log(f"✅ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg} -> {new_email}")
+                        success_count += 1
+                    else:
+                        self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
+                        failures.append((bid, msg))
+                except Exception as e:
+                    self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {e}")
+                    failures.append((bid, str(e)))
+
+        if failures:
+            self.log("失败明细（最多10条）：")
+            for bid, msg in failures[:10]:
+                self.log(f"  - {bid[:12]}...: {msg}")
+
+        self.log(f"辅助邮箱修改完成，成功 {success_count}/{len(ids_to_process)} 个")
+        self.finished_signal.emit({
+            'type': 'change_recovery_email',
+            'count': success_count,
+            'total': len(ids_to_process)
+        })

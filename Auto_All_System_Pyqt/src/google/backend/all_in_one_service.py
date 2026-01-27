@@ -59,20 +59,28 @@ def process_all_in_one(
     # 获取账号信息
     account_info = None
     try:
-        browser_info = get_browser_info(browser_id)
-        if browser_info:
-            remark = browser_info.get('remark', '')
-            if '----' in remark:
-                parts = remark.split('----')
-                if len(parts) >= 4:
-                    account_info = {
-                        'email': parts[0].strip(),
-                        'password': parts[1].strip(),
-                        'backup': parts[2].strip(),
-                        'secret': parts[3].strip()
-                    }
-                    log(f"📧 账号: {account_info['email']}")
-    except:
+        row = DBManager.get_account_by_browser_id(browser_id)
+        if row:
+            account_info = {
+                'email': row.get('email') or '',
+                'password': row.get('password') or '',
+                'backup': row.get('recovery_email') or '',
+                'secret': row.get('secret_key') or ''
+            }
+        else:
+            browser_info = get_browser_info(browser_id)
+            if browser_info:
+                from core.database import build_account_info_from_remark
+                tmp = build_account_info_from_remark(browser_info.get('remark', ''))
+                account_info = {
+                    'email': tmp.get('email') or '',
+                    'password': tmp.get('password') or '',
+                    'backup': tmp.get('backup') or '',
+                    'secret': tmp.get('secret') or ''
+                }
+        if account_info and account_info.get('email'):
+            log(f"📧 账号: {account_info['email']}")
+    except Exception:
         pass
     
     # 打开浏览器
@@ -144,10 +152,9 @@ def process_all_in_one(
                     
                     if sheer_link and api_key:
                         # 从链接中提取verification ID
-                        import re
-                        vid_match = re.search(r'verificationId=([a-f0-9]+)', sheer_link)
-                        if vid_match:
-                            vid = vid_match.group(1)
+                        from .google_one_detector import extract_verification_id
+                        vid = extract_verification_id(sheer_link)
+                        if vid:
                             log(f"   验证ID: {vid[:20]}...")
                             
                             # 验证SheerID
@@ -202,4 +209,3 @@ def process_all_in_one(
                 return False, 'error', str(e)
     
     return asyncio.run(_run())
-

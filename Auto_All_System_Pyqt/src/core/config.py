@@ -40,7 +40,7 @@ class Config:
     WEB_SERVER_PORT = 8080
     
     # SheerID配置
-    SHEERID_BASE_URL = "https://batch.1key.me"
+    SHEERID_BASE_URL = "https://neigui.1key.me"
     SHEERID_DEFAULT_API_KEY = ""
     
     # 比特浏览器API配置

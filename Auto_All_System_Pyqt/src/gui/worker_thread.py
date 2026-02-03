@@ -134,6 +134,13 @@ class WorkerThread(QThread):
                     if success:
                         self.log(f"✅ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
                         success_count += 1
+                        # 更新操作记录（仅当提取到链接时）
+                        if "Link Found" in msg or "提取成功" in msg:
+                            try:
+                                from core.database import DBManager
+                                DBManager.update_operation_timestamp(bid, 'sheerlink_extracted')
+                            except:
+                                pass
                     else:
                         self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
                     
@@ -435,9 +442,13 @@ class WorkerThread(QThread):
                 if status == 'success':
                     self.log(f"  ✅ {vid[:20]}... 验证成功")
                     success_count += 1
-                    # 更新数据库状态
+                    # 更新数据库状态和操作记录
                     try:
                         DBManager.update_account_status_by_sheerid(vid, 'verified')
+                        # 查找对应的browser_id并更新操作记录
+                        account = DBManager.get_account_by_sheerid(vid)
+                        if account and account.get('browser_id'):
+                            DBManager.update_operation_timestamp(account['browser_id'], 'sheerid_verified')
                     except:
                         pass
                 else:
@@ -498,6 +509,12 @@ class WorkerThread(QThread):
                     if success:
                         self.log(f"✅ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
                         success_count += 1
+                        # 更新操作记录
+                        try:
+                            from core.database import DBManager
+                            DBManager.update_operation_timestamp(bid, 'bind_card')
+                        except:
+                            pass
                     else:
                         self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
                 except Exception as e:
@@ -567,12 +584,25 @@ class WorkerThread(QThread):
                     success, final_status, msg = future.result()
                     if success:
                         self.log(f"✅ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
-                        if final_status == 'subscribed':
-                            stats['subscribed'] += 1
-                        elif final_status == 'verified':
-                            stats['verified'] += 1
-                        else:
-                            stats['link_extracted'] += 1
+                        # 更新操作记录
+                        try:
+                            from core.database import DBManager
+                            if final_status == 'subscribed':
+                                stats['subscribed'] += 1
+                                DBManager.update_operation_timestamp(bid, 'bind_card')
+                            elif final_status == 'verified':
+                                stats['verified'] += 1
+                                DBManager.update_operation_timestamp(bid, 'sheerid_verified')
+                            else:
+                                stats['link_extracted'] += 1
+                                DBManager.update_operation_timestamp(bid, 'sheerlink_extracted')
+                        except:
+                            if final_status == 'subscribed':
+                                stats['subscribed'] += 1
+                            elif final_status == 'verified':
+                                stats['verified'] += 1
+                            else:
+                                stats['link_extracted'] += 1
                     else:
                         self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
                         stats['failed'] += 1
@@ -644,6 +674,12 @@ class WorkerThread(QThread):
                     if success:
                         self.log(f"✅ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
                         success_count += 1
+                        # 更新年龄验证操作记录
+                        try:
+                            from core.database import DBManager
+                            DBManager.update_operation_timestamp(bid, 'age_verified')
+                        except:
+                            pass
                     else:
                         self.log(f"❌ ({finished_tasks}/{len(ids_to_process)}) {bid[:12]}...: {msg}")
                         failures.append((bid, msg))

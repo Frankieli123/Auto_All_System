@@ -119,6 +119,14 @@ class DBManager:
                 cursor.execute('ALTER TABLE accounts ADD COLUMN secret_updated_at TEXT')
             if 'recovery_updated_at' not in columns:
                 cursor.execute('ALTER TABLE accounts ADD COLUMN recovery_updated_at TEXT')
+            if 'sheerid_verified_at' not in columns:
+                cursor.execute('ALTER TABLE accounts ADD COLUMN sheerid_verified_at TEXT')
+            if 'bind_card_at' not in columns:
+                cursor.execute('ALTER TABLE accounts ADD COLUMN bind_card_at TEXT')
+            if 'age_verified_at' not in columns:
+                cursor.execute('ALTER TABLE accounts ADD COLUMN age_verified_at TEXT')
+            if 'sheerlink_extracted_at' not in columns:
+                cursor.execute('ALTER TABLE accounts ADD COLUMN sheerlink_extracted_at TEXT')
             
             # ==================== 代理表 ====================
             cursor.execute('''
@@ -530,6 +538,33 @@ class DBManager:
             conn.close()
     
     @staticmethod
+    def update_operation_timestamp(browser_id: str, operation: str):
+        """
+        @brief 更新账号的操作记录时间戳
+        @param browser_id 浏览器窗口ID
+        @param operation 操作类型: 'sheerid_verified', 'bind_card', 'age_verified', 'sheerlink_extracted'
+        """
+        field_map = {
+            'sheerid_verified': 'sheerid_verified_at',
+            'bind_card': 'bind_card_at',
+            'age_verified': 'age_verified_at',
+            'sheerlink_extracted': 'sheerlink_extracted_at'
+        }
+        field = field_map.get(operation)
+        if not field or not browser_id:
+            return
+        with lock:
+            conn = DBManager.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                UPDATE accounts 
+                SET {field} = ?, updated_at = ?
+                WHERE browser_id = ?
+            """, (get_local_timestamp(), get_local_timestamp(), browser_id))
+            conn.commit()
+            conn.close()
+    
+    @staticmethod
     def get_accounts_count_by_status():
         """
         @brief 获取各状态账号统计
@@ -619,6 +654,25 @@ class DBManager:
             """, (status, get_local_timestamp(), f'%{verification_id}%'))
             conn.commit()
             conn.close()
+    
+    @staticmethod
+    def get_account_by_sheerid(verification_id: str):
+        """
+        @brief 根据SheerID验证ID获取账号信息
+        @param verification_id SheerID验证ID
+        @return 账号字典或None
+        """
+        if not verification_id:
+            return None
+        with lock:
+            conn = DBManager.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM accounts WHERE verification_link LIKE ?
+            """, (f'%{verification_id}%',))
+            row = cursor.fetchone()
+            conn.close()
+            return dict(row) if row else None
     
     # ==================== 代理管理 ====================
     
@@ -896,16 +950,17 @@ class DBManager:
         
         # 尝试空格分隔
         parts = line.split()
-        if len(parts) < 4:
+        if len(parts) < 3:
             # 尝试 ---- 分隔
             parts = line.split('----')
         
-        if len(parts) < 4:
+        if len(parts) < 3:
             return None
         
         result['number'] = parts[0].replace('-', '').replace(' ', '')
 
         # 兼容格式：卡号 MM/YY CVV [持卡人] [邮编]
+        # 或者：卡号----MM/YY----CVV
         tail_index = 4
         if len(parts) >= 3 and '/' in parts[1]:
             exp_parts = parts[1].split('/', 1)
@@ -915,14 +970,27 @@ class DBManager:
                 result['cvv'] = parts[2]
                 tail_index = 3
             else:
+                if len(parts) >= 4:
+                    result['exp_month'] = parts[1]
+                    result['exp_year'] = parts[2]
+                    result['cvv'] = parts[3]
+                else:
+                    return None
+        else:
+            # 默认格式：卡号 月 年 CVV（需要4个字段）
+            if len(parts) >= 4:
                 result['exp_month'] = parts[1]
                 result['exp_year'] = parts[2]
                 result['cvv'] = parts[3]
-        else:
-            # 默认格式：卡号 月 年 CVV
-            result['exp_month'] = parts[1]
-            result['exp_year'] = parts[2]
-            result['cvv'] = parts[3]
+            else:
+                return None
+        
+        # 如果没有额外信息，使用默认美国地址
+        if len(parts) <= tail_index:
+            result['zip_code'] = '10001'
+            result['city'] = 'New York'
+            result['state'] = 'NY'
+            result['country'] = 'US'
         
         # 处理尾部字段（可能是持卡人/邮编/国家/地址信息）
         tail = parts[tail_index:]

@@ -882,4 +882,14 @@ def process_bind_card(browser_id: str, card_info: dict = None, log_callback: Cal
             except Exception as e:
                 return False, str(e)
     
-    return asyncio.run(_run())
+    success, msg = asyncio.run(_run())
+    
+    # 订阅成功后自动关闭浏览器
+    if success:
+        try:
+            log("订阅成功，关闭浏览器...")
+            close_browser(browser_id)
+        except Exception as e:
+            log(f"关闭浏览器失败: {e}")
+    
+    return success, msg

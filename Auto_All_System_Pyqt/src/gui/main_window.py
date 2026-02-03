@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
         
         # 任务控制标志
         self._stop_flag = False
+        self._is_refreshing = False
         
         # 设置窗口图标
         self._set_icon()
@@ -632,9 +633,14 @@ class MainWindow(QMainWindow):
         header.setStretchLastSection(True)
         
         self.browser_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.browser_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # 支持拖动多选
+        self.browser_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # 支持Shift/Ctrl多选
+        self.browser_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)  # 双击才能编辑
         self.browser_table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # 允许键盘焦点
         self.browser_table.setAlternatingRowColors(True)  # 隔行变色
+        
+        # 空格键切换选中行的勾选状态
+        self.browser_table.itemChanged.connect(self._on_table_item_changed)
+        self.browser_table.keyPressEvent = self._table_key_press_event
         
         layout.addWidget(self.browser_table)
         
@@ -670,6 +676,76 @@ class MainWindow(QMainWindow):
         return widget
     
     # ==================== 事件处理 ====================
+
+    def _on_table_item_changed(self, item):
+        """表格内容变更处理"""
+        if self._is_refreshing:
+            return
+
+        if item.column() != 2:
+            return
+
+        new_name = (item.text() or "").strip()
+        old_name = item.data(Qt.ItemDataRole.UserRole) or ""
+        old_name = str(old_name)
+
+        if new_name == old_name:
+            return
+
+        if not new_name:
+            self.log("❌ 修改失败：名称不能为空")
+            self._is_refreshing = True
+            item.setText(old_name)
+            self._is_refreshing = False
+            return
+
+        id_item = self.browser_table.item(item.row(), 3)
+        if not id_item:
+            self.log("❌ 修改失败：未找到窗口ID")
+            self._is_refreshing = True
+            item.setText(old_name)
+            self._is_refreshing = False
+            return
+
+        browser_id = id_item.text()
+        try:
+            from core.backend_config import is_geekez_backend
+            from core.bit_api import get_api
+
+            api = get_api()
+            if is_geekez_backend():
+                res = api.patch_browser(browser_id, {"name": new_name})
+            else:
+                res = api.update_browser_partial([browser_id], {"name": new_name})
+
+            if res.get("success", False):
+                item.setData(Qt.ItemDataRole.UserRole, new_name)
+                self.log("✅ 名称修改成功")
+            else:
+                raise Exception(res.get("msg", "未知错误"))
+        except Exception as e:
+            self.log(f"❌ 修改失败: {e}")
+            self._is_refreshing = True
+            item.setText(old_name)
+            self._is_refreshing = False
+
+    def _table_key_press_event(self, event):
+        """表格键盘事件处理 - 空格键切换选中行的勾选状态"""
+        if event.key() == Qt.Key.Key_Space:
+            selected_rows = set()
+            for item in self.browser_table.selectedItems():
+                selected_rows.add(item.row())
+            
+            for row in selected_rows:
+                chk_item = self.browser_table.item(row, 0)
+                if chk_item:
+                    if chk_item.checkState() == Qt.CheckState.Checked:
+                        chk_item.setCheckState(Qt.CheckState.Unchecked)
+                    else:
+                        chk_item.setCheckState(Qt.CheckState.Checked)
+        else:
+            # 调用默认处理
+            QTableWidget.keyPressEvent(self.browser_table, event)
     
     def _on_startup(self):
         """启动时执行"""
@@ -697,6 +773,7 @@ class MainWindow(QMainWindow):
     
     def _refresh_browser_list(self):
         """刷新浏览器列表"""
+        self._is_refreshing = True
         self.log("正在刷新窗口列表...")
         try:
             from core.bit_api import get_browser_list_simple
@@ -738,6 +815,11 @@ class MainWindow(QMainWindow):
                 ops_parts = []
                 secret_updated = account.get('secret_updated_at', '')
                 recovery_updated = account.get('recovery_updated_at', '')
+                sheerid_verified = account.get('sheerid_verified_at', '')
+                bind_card = account.get('bind_card_at', '')
+                age_verified = account.get('age_verified_at', '')
+                sheerlink_extracted = account.get('sheerlink_extracted_at', '')
+                
                 if secret_updated:
                     # 只显示日期部分 MM-DD
                     date_part = secret_updated[5:10] if len(secret_updated) >= 10 else secret_updated
@@ -745,6 +827,18 @@ class MainWindow(QMainWindow):
                 if recovery_updated:
                     date_part = recovery_updated[5:10] if len(recovery_updated) >= 10 else recovery_updated
                     ops_parts.append(f"✉️{date_part}")
+                if sheerlink_extracted:
+                    date_part = sheerlink_extracted[5:10] if len(sheerlink_extracted) >= 10 else sheerlink_extracted
+                    ops_parts.append(f"🔗{date_part}")
+                if sheerid_verified:
+                    date_part = sheerid_verified[5:10] if len(sheerid_verified) >= 10 else sheerid_verified
+                    ops_parts.append(f"✅{date_part}")
+                if age_verified:
+                    date_part = age_verified[5:10] if len(age_verified) >= 10 else age_verified
+                    ops_parts.append(f"🎂{date_part}")
+                if bind_card:
+                    date_part = bind_card[5:10] if len(bind_card) >= 10 else bind_card
+                    ops_parts.append(f"💳{date_part}")
                 ops_text = " ".join(ops_parts) if ops_parts else ""
                 
                 row = self.browser_table.rowCount()
@@ -752,19 +846,36 @@ class MainWindow(QMainWindow):
                 
                 # 复选框
                 chk_item = QTableWidgetItem()
-                chk_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                chk_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                 chk_item.setCheckState(Qt.CheckState.Unchecked)
                 self.browser_table.setItem(row, 0, chk_item)
                 
                 # 序号列 - 使用NumericTableWidgetItem支持数值排序
                 seq_item = NumericTableWidgetItem(str(seq))
+                seq_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
                 self.browser_table.setItem(row, 1, seq_item)
                 
-                self.browser_table.setItem(row, 2, QTableWidgetItem(name))
-                self.browser_table.setItem(row, 3, QTableWidgetItem(browser_id))
-                self.browser_table.setItem(row, 4, QTableWidgetItem(status_text))
-                self.browser_table.setItem(row, 5, QTableWidgetItem(ops_text))
-                self.browser_table.setItem(row, 6, QTableWidgetItem(remark[:80] + '...' if len(remark) > 80 else remark))
+                # 其他列 - 可选择但不可编辑
+                name_item = QTableWidgetItem(name)
+                name_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsEditable)
+                name_item.setData(Qt.ItemDataRole.UserRole, name)
+                self.browser_table.setItem(row, 2, name_item)
+                
+                id_item = QTableWidgetItem(browser_id)
+                id_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                self.browser_table.setItem(row, 3, id_item)
+                
+                status_item = QTableWidgetItem(status_text)
+                status_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                self.browser_table.setItem(row, 4, status_item)
+                
+                ops_item = QTableWidgetItem(ops_text)
+                ops_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                self.browser_table.setItem(row, 5, ops_item)
+                
+                remark_item = QTableWidgetItem(remark[:80] + '...' if len(remark) > 80 else remark)
+                remark_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                self.browser_table.setItem(row, 6, remark_item)
             
             # 重新启用排序
             self.browser_table.setSortingEnabled(True)
@@ -774,6 +885,8 @@ class MainWindow(QMainWindow):
             self.log(f"刷新列表失败: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            self._is_refreshing = False
     
     def _refresh_2fa(self):
         """刷新并保存2FA验证码到文件"""
@@ -1368,7 +1481,7 @@ class MainWindow(QMainWindow):
         # 弹出输入API Key对话框
         api_key, ok = QInputDialog.getText(
             self, "SheerID API Key", 
-            "请输入SheerID验证API Key:\n(从 batch.1key.me 获取)",
+            "请输入SheerID验证API Key:\n(从 neigui.1key.me 获取)",
             QLineEdit.EchoMode.Normal, ""
         )
         
